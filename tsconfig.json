@@ -1,0 +1,13 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/shared" },
+    { "path": "./packages/payment-terminal" },
+    { "path": "./packages/receipt-printer" },
+    { "path": "./packages/db" },
+    { "path": "./apps/local-api" },
+    { "path": "./apps/owner-pos" },
+    { "path": "./apps/worker-pwa" },
+    { "path": "./apps/customer-pwa" }
+  ]
+}

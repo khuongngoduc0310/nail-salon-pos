@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+.turbo/
+.vite/
+.env
+*.local
+*.tsbuildinfo
+packages/db/prisma/generated/

@@ -1,0 +1,63 @@
+# Checkout Flow
+
+## Normal service sale
+
+1. Customer checks in.
+2. Owner selects customer from queue.
+3. Owner selects services.
+4. POS suggests workers.
+5. Owner chooses worker(s).
+6. Owner starts turn/service.
+7. Turn status becomes `in_service`.
+8. Worker's turn count increases for reporting.
+9. Worker completes service.
+10. Owner opens checkout.
+11. POS calculates subtotal, discounts, tips, total.
+12. Customer pays by cash, gift card, card, or split payment.
+13. POS marks sale paid when fully paid.
+14. POS prints custom salon receipt.
+15. Check-in status becomes `paid`.
+
+## Split payment
+
+Example total: $120.
+
+1. Gift card payment: $20.
+2. Cash payment: $40.
+3. Clover card payment: $60.
+4. Sale is paid when paid total reaches $120.
+
+Only $60 should be sent to Clover.
+
+## Declined card payment
+
+1. POS starts Clover payment.
+2. Clover returns declined.
+3. Payment row status becomes `declined`.
+4. Sale remains unpaid or partially paid.
+5. Owner can retry card or choose another payment method.
+
+## Cancelled payment
+
+1. Owner/customer cancels on Clover.
+2. Payment row status becomes `cancelled`.
+3. Sale remains unpaid or partially paid.
+
+## Connection uncertainty
+
+If Clover connection is lost after payment is initiated:
+
+1. Do not mark sale paid immediately.
+2. Run payment recovery/reconciliation using idempotency key/provider reference.
+3. If Clover confirms approved, mark approved.
+4. If no approved payment exists, keep unpaid and allow retry.
+
+## Completion guard
+
+A sale can only be completed when:
+
+```text
+amount_paid_cents >= total_cents
+```
+
+If overpaid with cash, calculate change due. Do not store change as revenue.

@@ -1,0 +1,9 @@
+{
+  "name": "Nail Salon Booking",
+  "short_name": "Salon Booking",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f7f8f5",
+  "theme_color": "#6c4d2f",
+  "icons": []
+}
