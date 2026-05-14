@@ -13,6 +13,7 @@ import {
   asObject,
   getParams,
   handleRouteError,
+  HttpError,
   optionalInteger,
   optionalString,
   requiredInteger,
@@ -34,6 +35,8 @@ type WorkerRecord = {
 type SaleRecord = {
   id: string;
   checkinId?: string | null;
+  customerId?: string | null;
+  status?: string;
   totalCents: number;
   items?: SaleItemRecord[];
   payments?: PaymentRecord[];
@@ -53,10 +56,22 @@ type SaleItemRecord = {
 type PaymentRecord = {
   method: PaymentMethod;
   amountCents: number;
+  tipCents?: number;
   status: PaymentStatus;
 };
 
 export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient, terminal: PaymentTerminalAdapter) {
+  app.get("/api/sales/:id", async (request, reply) => {
+    try {
+      const params = getParams(request);
+      const sale = requireRecord<SaleRecord>(await db.sale.findUnique(saleLookup(requiredString(params.id, "id"))), "sale not found");
+
+      return sale;
+    } catch (error) {
+      return handleRouteError(error, reply);
+    }
+  });
+
   app.post("/api/sales", async (request, reply) => {
     try {
       const body = asObject(request.body);
@@ -87,21 +102,28 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
       const body = asObject(request.body);
       const params = getParams(request);
       const saleId = requiredString(params.id, "id");
-      const serviceId = requiredString(body.serviceId, "serviceId");
+      const serviceId = optionalString(body.serviceId, "serviceId");
+      const customName = optionalString(body.customName, "customName");
       const workerId = requiredString(body.workerId, "workerId");
 
+      if (!serviceId && !customName) {
+        return reply.code(400).send({ error: "serviceId or customName is required" });
+      }
+
       const result = await db.$transaction(async (tx) => {
-        const service = requireRecord<ServiceRecord>(
-          await tx.service.findUnique({ where: { id: serviceId }, include: { category: true } }),
-          "service not found"
-        );
+        const service = serviceId
+          ? requireRecord<ServiceRecord>(
+              await tx.service.findUnique({ where: { id: serviceId }, include: { category: true } }),
+              "service not found"
+            )
+          : null;
         const worker = requireRecord<WorkerRecord>(await tx.worker.findUnique({ where: { id: workerId } }), "worker not found");
         const item = calculateSaleItem({
-          serviceId,
+          serviceId: serviceId ?? undefined,
           workerId,
-          serviceNameSnapshot: service.name,
-          categoryNameSnapshot: service.category?.name ?? null,
-          priceCents: optionalInteger(body.priceCents, "priceCents") ?? service.priceCents,
+          serviceNameSnapshot: customName ?? service!.name,
+          categoryNameSnapshot: service?.category?.name ?? null,
+          priceCents: optionalInteger(body.priceCents, "priceCents") ?? service?.priceCents ?? 0,
           discountCents: optionalInteger(body.discountCents, "discountCents") ?? 0,
           tipCents: optionalInteger(body.tipCents, "tipCents") ?? 0,
           commissionRate: Number(worker.commissionRate),
@@ -130,6 +152,24 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
       });
 
       return reply.code(201).send(result);
+    } catch (error) {
+      return handleRouteError(error, reply);
+    }
+  });
+
+  app.delete("/api/sales/:id/items/:itemId", async (request, reply) => {
+    try {
+      const params = getParams(request);
+      const saleId = requiredString(params.id, "id");
+      const itemId = requiredString(params.itemId, "itemId");
+
+      const result = await db.$transaction(async (tx) => {
+        await tx.saleItem.update({ where: { id: itemId }, data: { status: "voided" } });
+        const sale = await recomputeSale(tx, saleId);
+        return { sale };
+      });
+
+      return result;
     } catch (error) {
       return handleRouteError(error, reply);
     }
@@ -215,11 +255,15 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
       const body = asObject(request.body);
       const params = getParams(request);
       const saleId = requiredString(params.id, "id");
+      // amountCents = balance due before tip. Customer enters tip on Clover Mini.
       const amountCents = requiredInteger(body.amountCents, "amountCents");
-      const tipCents = optionalInteger(body.tipCents, "tipCents") ?? 0;
       const idempotencyKey = requiredString(body.idempotencyKey, "idempotencyKey");
-      const terminalResult = await terminal.startSale({ amountCents, tipCents, idempotencyKey });
+      const terminalResult = await terminal.startSale({ amountCents, idempotencyKey });
       const paymentStatus = mapTerminalStatus(terminalResult.status);
+      // Tip entered by customer on the terminal.
+      const tipCents = terminalResult.tipCents ?? 0;
+      // Total charged = base + tip; store as amountCents so sale completion math works.
+      const totalChargedCents = paymentStatus === "approved" ? amountCents + tipCents : amountCents;
 
       const result = await db.$transaction(async (tx) => {
         const payment = await tx.payment.create({
@@ -229,7 +273,7 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
             provider: "mock",
             providerPaymentId: terminalResult.providerPaymentId,
             idempotencyKey,
-            amountCents,
+            amountCents: totalChargedCents,
             tipCents,
             status: paymentStatus,
             cardBrand: terminalResult.cardBrand,
@@ -243,10 +287,81 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
         });
         const sale = await recomputeSale(tx, saleId);
 
-        return { payment, sale, terminalStatus: terminalResult.status };
+        // tipCents returned so the POS can open the tip-distribution review UI.
+        return { payment, sale, terminalStatus: terminalResult.status, tipCents };
       });
 
       return reply.code(201).send(result);
+    } catch (error) {
+      return handleRouteError(error, reply);
+    }
+  });
+
+  // Batch-set tip per sale item after the customer enters a tip on the Clover Mini.
+  // Body: { items: [{ itemId: string, tipCents: number }] }
+  // The POS auto-calculates the split by service value %; the owner can adjust before confirming.
+  // Rebalancing is enforced client-side; this endpoint trusts the submitted amounts.
+  app.post("/api/sales/:id/tip-distribution", async (request, reply) => {
+    try {
+      const body = asObject(request.body);
+      const params = getParams(request);
+      const saleId = requiredString(params.id, "id");
+      const rawItems = body.items;
+
+      if (!Array.isArray(rawItems) || rawItems.length === 0) {
+        return reply.code(400).send({ error: "items must be a non-empty array" });
+      }
+
+      const result = await db.$transaction(async (tx) => {
+        const sale = requireRecord<SaleRecord>(await tx.sale.findUnique(saleLookup(saleId)), "sale not found");
+        const cardTipApprovedCents = (sale.payments ?? []).reduce((sum, payment) => {
+          if (payment.method !== "card" || payment.status !== "approved") return sum;
+          return sum + Math.max(0, payment.tipCents ?? 0);
+        }, 0);
+        if (cardTipApprovedCents <= 0) {
+          throw new HttpError(400, "cannot set tip distribution without approved Clover tip");
+        }
+
+        let submittedTipCents = 0;
+        for (const raw of rawItems) {
+          const item = asObject(raw);
+          const itemId = requiredString(item.itemId, "itemId");
+          const tipCents = requiredInteger(item.tipCents, "tipCents");
+          submittedTipCents += tipCents;
+
+          const existing = requireRecord<SaleItemRecord>(
+            await tx.saleItem.findUnique({ where: { id: itemId } }),
+            `sale item ${itemId} not found`
+          );
+          const recalculated = calculateSaleItem({
+            workerId: existing.workerId ?? "",
+            serviceNameSnapshot: existing.serviceNameSnapshot ?? "Service",
+            categoryNameSnapshot: existing.categoryNameSnapshot,
+            priceCents: existing.priceCents,
+            discountCents: existing.discountCents,
+            tipCents,
+            commissionRate: Number(existing.commissionRateSnapshot ?? 0),
+          });
+          await tx.saleItem.update({
+            where: { id: itemId },
+            data: {
+              tipCents,
+              workerTotalCents: recalculated.workerTotalCents,
+              businessCents: recalculated.businessCents,
+            },
+          });
+        }
+
+        console.log(`[DEBUG tip-distribution] saleId: ${saleId}, cardTipApprovedCents: ${cardTipApprovedCents}, submittedTipCents: ${submittedTipCents}`);
+        if (submittedTipCents !== cardTipApprovedCents) {
+          throw new HttpError(400, "tip distribution must equal approved Clover tip total");
+        }
+
+        const recomputed = await recomputeSale(tx, saleId);
+        return { sale: recomputed };
+      });
+
+      return result;
     } catch (error) {
       return handleRouteError(error, reply);
     }
@@ -264,14 +379,31 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
       }
 
       const result = await db.$transaction(async (tx) => {
+        const completedAt = new Date();
         const completedSale = await tx.sale.update({
           where: { id: saleId },
           data: {
             status: "paid",
             amountPaidCents: summary.amountPaidCents,
-            completedAt: new Date(),
+            completedAt,
           },
         });
+        const workerIds = [...new Set((sale.items ?? []).map((item) => item.workerId).filter(Boolean))] as string[];
+        for (const workerId of workerIds) {
+          await tx.turn.create({
+            data: {
+              workerId,
+              customerId: sale.customerId ?? undefined,
+              checkinId: sale.checkinId ?? undefined,
+              saleId,
+              turnType: "manual",
+              status: "completed",
+              startedAt: completedAt,
+              endedAt: completedAt,
+              completedAt,
+            },
+          });
+        }
         const checkin = sale.checkinId
           ? await tx.checkin.update({ where: { id: sale.checkinId }, data: { status: "paid" } })
           : null;
@@ -340,7 +472,10 @@ function saleLookup(saleId: string) {
   return {
     where: { id: saleId },
     include: {
-      items: { where: { status: "active" } },
+      customer: true,
+      checkin: { include: { customer: true } },
+      appointment: { include: { customer: true, worker: true } },
+      items: { where: { status: "active" }, include: { worker: true, service: true } },
       payments: true,
     },
   };

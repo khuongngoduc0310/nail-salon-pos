@@ -47,6 +47,19 @@ The local API now supports checkout basics:
 
 Sale items snapshot service name, category, price, worker, commission rate, commission amount, worker total, and business share. Cash and gift-card payments are recorded as approved payments. Mock card payments use the payment terminal adapter and only approved card payments count toward sale completion. Completing a sale requires approved payments to cover the total and marks the related check-in as paid.
 
+## Fifth milestone seeded demo Owner POS
+
+The Owner POS now drives a usable seeded demo day through the real local API and Prisma database:
+
+- Queue assignment from waiting check-ins to workers
+- Start and complete assigned/in-service turns
+- Ready-for-checkout customer sale creation
+- Service item and tip entry
+- Cash, gift-card, and mock-card payments
+- Paid sale completion
+
+Run `corepack pnpm db:seed` after migrations to reset the demo day to known customers, workers, turns, appointments, and one completed paid sale for dashboard totals.
+
 ### Workspace layout
 
 ```text

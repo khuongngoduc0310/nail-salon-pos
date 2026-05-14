@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/server.ts",
-    "start": "tsx src/server.ts",
+    "dev": "node ../../scripts/with-root-env.mjs tsx watch src/server.ts",
+    "start": "node ../../scripts/with-root-env.mjs tsx src/server.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

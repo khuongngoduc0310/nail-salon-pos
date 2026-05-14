@@ -102,11 +102,24 @@ function createCheckoutFakeDb() {
     sale: {
       id: "sale-1",
       checkinId: "checkin-1",
+      customerId: "customer-1",
       status: "open",
       totalCents: 0,
       amountPaidCents: 0,
-      items: [] as Array<{ id: string; priceCents: number; discountCents: number; tipCents: number; status: string }>,
-      payments: [] as Array<{ method: "cash" | "card" | "gift_card"; amountCents: number; status: "approved" | "declined" | "cancelled" | "failed" }>,
+      items: [] as Array<{
+        id: string;
+        workerId?: string;
+        priceCents: number;
+        discountCents: number;
+        tipCents: number;
+        status: string;
+      }>,
+      payments: [] as Array<{
+        method: "cash" | "card" | "gift_card";
+        amountCents: number;
+        tipCents?: number;
+        status: "approved" | "declined" | "cancelled" | "failed";
+      }>,
     },
   };
   const nextId = (prefix: string) => `${prefix}-${id++}`;
@@ -142,6 +155,10 @@ function createCheckoutFakeDb() {
     checkin: emptyModel("checkin", calls),
     turn: emptyModel("turn", calls),
     sale: {
+      findMany: async (args?: unknown) => {
+        calls.push({ model: "sale", method: "findMany", args });
+        return [{ ...state.sale }];
+      },
       findUnique: async (args: unknown) => {
         calls.push({ model: "sale", method: "findUnique", args });
         return { ...state.sale };
@@ -170,14 +187,25 @@ function createCheckoutFakeDb() {
       },
       update: async (args: unknown) => {
         calls.push({ model: "saleItem", method: "update", args });
-        return { id: "item-1", args };
+        const where = (args as { where?: { id?: string } }).where;
+        const data = (args as { data?: { tipCents?: number } }).data;
+        if (where?.id && typeof data?.tipCents === "number") {
+          const index = state.sale.items.findIndex((item) => item.id === where.id);
+          if (index >= 0) state.sale.items[index] = { ...state.sale.items[index], tipCents: data.tipCents };
+        }
+        return { id: where?.id ?? "item-1", args };
       },
     },
     payment: {
       create: async (args: unknown) => {
         calls.push({ model: "payment", method: "create", args });
         const data = (args as {
-          data: { method: "cash" | "card" | "gift_card"; amountCents: number; status: "approved" | "declined" | "cancelled" | "failed" };
+          data: {
+            method: "cash" | "card" | "gift_card";
+            amountCents: number;
+            tipCents?: number;
+            status: "approved" | "declined" | "cancelled" | "failed";
+          };
         }).data;
         const payment = { id: nextId("payment"), ...data };
         state.sale.payments.push(data);
@@ -466,7 +494,16 @@ describe("local API CRUD routes", () => {
         id: "worker-3",
         displayName: "Cindy",
         currentStatus: "in_service",
-        turns: [{ id: "turn-3", status: "in_service", startedAt: "2026-05-12T15:30:00.000Z" }],
+        turns: [
+          {
+            id: "turn-3",
+            workerId: "worker-3",
+            checkinId: "checkin-3",
+            status: "in_service",
+            startedAt: "2026-05-12T15:30:00.000Z",
+            checkin: { notes: "Gel manicure", customer: { id: "customer-3", name: "Grace" } },
+          },
+        ],
         saleItems: [],
       },
     ]);
@@ -492,6 +529,12 @@ describe("local API CRUD routes", () => {
         {
           workerId: "worker-3",
           turnsTakenToday: 1,
+          activeTurn: {
+            id: "turn-3",
+            checkinId: "checkin-3",
+            workerId: "worker-3",
+            customer: { id: "customer-3", name: "Grace" },
+          },
           suggestionRank: null,
         },
       ],
@@ -528,6 +571,16 @@ describe("local API CRUD routes", () => {
         },
       },
     });
+  });
+
+  it("returns sale detail for checkout state", async () => {
+    const { db } = createCheckoutFakeDb();
+    const app = await buildServer({ db, logger: false });
+
+    const response = await app.inject({ method: "GET", url: "/api/sales/sale-1" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ id: "sale-1", checkinId: "checkin-1", status: "open" });
   });
 
   it("adds a service item with service and worker snapshots", async () => {
@@ -595,7 +648,7 @@ describe("local API CRUD routes", () => {
 
     expect(complete.statusCode).toBe(200);
     expect(state.sale.status).toBe("paid");
-    expect(state.sale.amountPaidCents).toBe(12000);
+    expect(state.sale.amountPaidCents).toBe(13080);
   });
 
   it("keeps sale unpaid when mock card declines", async () => {
@@ -624,5 +677,76 @@ describe("local API CRUD routes", () => {
 
     expect(response.statusCode).toBe(400);
     expect(response.json()).toMatchObject({ error: "sale is underpaid", balanceDueCents: 8000 });
+  });
+
+  it("increments one completed turn per worker involved in the sale", async () => {
+    const { db, calls, state } = createCheckoutFakeDb();
+    state.sale.items.push(
+      { id: "item-1", workerId: "worker-1", priceCents: 7000, discountCents: 0, tipCents: 0, status: "active" },
+      { id: "item-2", workerId: "worker-2", priceCents: 5000, discountCents: 0, tipCents: 0, status: "active" }
+    );
+    const app = await buildServer({ db, logger: false });
+
+    await app.inject({
+      method: "POST",
+      url: "/api/sales/sale-1/payments/cash",
+      payload: { amountCents: 12000 },
+    });
+    const complete = await app.inject({ method: "POST", url: "/api/sales/sale-1/complete" });
+
+    expect(complete.statusCode).toBe(200);
+    const turnCreates = calls.filter((call) => call.model === "turn" && call.method === "create");
+    expect(turnCreates).toHaveLength(2);
+    expect(turnCreates.map((call) => (call.args as { data: { workerId: string } }).data.workerId).sort()).toEqual([
+      "worker-1",
+      "worker-2",
+    ]);
+  });
+
+  it("rejects tip distribution when there is no approved Clover tip", async () => {
+    const { db, state } = createCheckoutFakeDb();
+    state.sale.items.push({ id: "item-1", priceCents: 12000, discountCents: 0, tipCents: 0, status: "active" });
+    const app = await buildServer({ db, logger: false });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/sales/sale-1/tip-distribution",
+      payload: { items: [{ itemId: "item-1", tipCents: 1080 }] },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.body).toContain("cannot set tip distribution without approved Clover tip");
+  });
+
+  it("accepts tip distribution only when submitted total matches Clover tip", async () => {
+    const { db, state } = createCheckoutFakeDb();
+    state.sale.items.push(
+      { id: "item-1", priceCents: 7000, discountCents: 0, tipCents: 0, status: "active" },
+      { id: "item-2", priceCents: 5000, discountCents: 0, tipCents: 0, status: "active" }
+    );
+    const app = await buildServer({ db, logger: false, terminal: new MockTerminalAdapter("approved") });
+
+    await app.inject({
+      method: "POST",
+      url: "/api/sales/sale-1/payments/card/start",
+      payload: { amountCents: 12000, idempotencyKey: "tip-dist-card" },
+    });
+
+    const bad = await app.inject({
+      method: "POST",
+      url: "/api/sales/sale-1/tip-distribution",
+      payload: { items: [{ itemId: "item-1", tipCents: 400 }, { itemId: "item-2", tipCents: 500 }] },
+    });
+    expect(bad.statusCode).toBe(400);
+    expect(bad.body).toContain("tip distribution must equal approved Clover tip total");
+
+    const ok = await app.inject({
+      method: "POST",
+      url: "/api/sales/sale-1/tip-distribution",
+      payload: { items: [{ itemId: "item-1", tipCents: 1260 }, { itemId: "item-2", tipCents: 900 }] },
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(state.sale.totalCents).toBe(14160);
+    expect(state.sale.amountPaidCents).toBe(14160);
   });
 });

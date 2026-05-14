@@ -6,14 +6,19 @@ export type TerminalConnectionStatus = {
 
 export type TerminalSaleRequest = {
   amountCents: number;
-  tipCents: number;
   idempotencyKey: string;
+  // tipCents is NOT sent to the terminal — the customer enters their tip directly
+  // on the Clover Mini screen. The approved tip is returned in TerminalPaymentResult.
 };
 
 export type TerminalPaymentStatus = "approved" | "declined" | "cancelled" | "failed";
 
 export type TerminalPaymentResult = {
   status: TerminalPaymentStatus;
+  /** Base amount approved (cents), excluding tip. */
+  amountCents?: number;
+  /** Tip amount entered by the customer on the terminal (cents). Only set when approved. */
+  tipCents?: number;
   providerPaymentId?: string;
   authCode?: string;
   cardBrand?: string;
@@ -75,8 +80,12 @@ export class MockTerminalAdapter implements PaymentTerminalAdapter {
       return { status, message: `Mock ${status}` };
     }
 
+    // Simulate customer entering an 18% tip on the Clover Mini screen.
+    const tipCents = Math.round(input.amountCents * 0.18);
     const result: TerminalPaymentResult = {
       status,
+      amountCents: input.amountCents,
+      tipCents,
       providerPaymentId: `mock_${input.idempotencyKey}`,
       authCode: "MOCKOK",
       cardBrand: "Visa",

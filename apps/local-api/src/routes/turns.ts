@@ -23,14 +23,22 @@ type TurnRecord = {
   startedAt: Date | string | null;
   endedAt?: Date | string | null;
   completedAt?: Date | string | null;
-  customer?: unknown;
+  customer?: CustomerRecord | null;
+  checkin?: { customer?: CustomerRecord | null; notes?: string | null } | null;
   checkinId?: string | null;
   appointmentId?: string | null;
+  workerId?: string | null;
 };
 
 type SaleItemRecord = {
   finalServiceCents?: number;
   tipCents?: number;
+};
+
+type CustomerRecord = {
+  id: string;
+  name?: string | null;
+  phone?: string | null;
 };
 
 export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
@@ -197,7 +205,7 @@ async function loadDashboardWorkers(db: DbClient): Promise<WorkerRecord[]> {
     include: {
       turns: {
         where: { createdAt: { gte: start, lt: end } },
-        include: { customer: true },
+        include: { customer: true, checkin: { include: { customer: true } } },
       },
       saleItems: {
         where: { createdAt: { gte: start, lt: end }, status: "active" },
@@ -222,7 +230,30 @@ function toRankingInput(worker: WorkerRecord): WorkerRankingInput {
 }
 
 function getActiveTurn(turns: TurnRecord[]): TurnRecord | null {
-  return turns.find((turn) => turn.status === "in_service") ?? null;
+  const active = turns.find((turn) => turn.status === "in_service" || turn.status === "assigned");
+  if (!active) {
+    return null;
+  }
+
+  const customer = active.customer ?? active.checkin?.customer ?? null;
+
+  return {
+    id: active.id,
+    status: active.status,
+    startedAt: active.startedAt,
+    endedAt: active.endedAt,
+    completedAt: active.completedAt,
+    checkinId: active.checkinId,
+    appointmentId: active.appointmentId,
+    workerId: active.workerId,
+    customer,
+    checkin: active.checkin
+      ? {
+          notes: active.checkin.notes,
+          customer,
+        }
+      : null,
+  };
 }
 
 function getLastTurnEndedAt(turns: TurnRecord[]): Date | string | null {

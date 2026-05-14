@@ -41,6 +41,7 @@ export type DbClient = {
     update(args: unknown): Promise<unknown>;
   };
   sale: {
+    findMany(args?: unknown): Promise<unknown[]>;
     findUnique(args: unknown): Promise<unknown | null>;
     create(args: unknown): Promise<unknown>;
     update(args: unknown): Promise<unknown>;

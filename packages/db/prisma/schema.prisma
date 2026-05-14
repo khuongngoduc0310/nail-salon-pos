@@ -11,6 +11,8 @@ enum UserRole {
   owner
   worker
   customer
+
+  @@map("user_role")
 }
 
 enum WorkerStatus {
@@ -19,6 +21,8 @@ enum WorkerStatus {
   on_break
   off_today
   appointment_only
+
+  @@map("worker_status")
 }
 
 enum CheckinStatus {
@@ -29,6 +33,8 @@ enum CheckinStatus {
   paid
   cancelled
   no_show
+
+  @@map("checkin_status")
 }
 
 enum AppointmentStatus {
@@ -39,6 +45,8 @@ enum AppointmentStatus {
   completed
   cancelled
   no_show
+
+  @@map("appointment_status")
 }
 
 enum TurnStatus {
@@ -47,6 +55,8 @@ enum TurnStatus {
   completed
   skipped
   cancelled
+
+  @@map("turn_status")
 }
 
 enum TurnType {
@@ -54,6 +64,8 @@ enum TurnType {
   appointment
   requested_worker
   manual
+
+  @@map("turn_type")
 }
 
 enum SaleStatus {
@@ -63,12 +75,16 @@ enum SaleStatus {
   paid
   refunded
   voided
+
+  @@map("sale_status")
 }
 
 enum SaleItemStatus {
   active
   refunded
   voided
+
+  @@map("sale_item_status")
 }
 
 enum PaymentMethod {
@@ -76,6 +92,8 @@ enum PaymentMethod {
   card
   gift_card
   other
+
+  @@map("payment_method")
 }
 
 enum PaymentStatus {
@@ -85,17 +103,23 @@ enum PaymentStatus {
   cancelled
   failed
   refunded
+
+  @@map("payment_status")
 }
 
 enum DiscountType {
   amount
   percent
+
+  @@map("discount_type")
 }
 
 enum GiftCardStatus {
   active
   disabled
   expired
+
+  @@map("gift_card_status")
 }
 
 enum GiftCardTxType {
@@ -103,6 +127,8 @@ enum GiftCardTxType {
   redeem
   refund
   adjustment
+
+  @@map("gift_card_tx_type")
 }
 
 model User {
