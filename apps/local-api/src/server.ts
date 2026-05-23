@@ -7,6 +7,7 @@ import { registerCatalogRoutes } from "./routes/catalog.js";
 import { registerCheckoutRoutes } from "./routes/checkout.js";
 import { registerPeopleRoutes } from "./routes/people.js";
 import { registerSchedulingRoutes } from "./routes/scheduling.js";
+import { registerSessionRoutes } from "./routes/sessions.js";
 import { registerTurnRoutes } from "./routes/turns.js";
 
 export type ServerOptions = {
@@ -49,6 +50,7 @@ export async function buildServer(options: ServerOptions = {}) {
   }));
 
   await registerCatalogRoutes(app, db);
+  await registerSessionRoutes(app, db);
   await registerPeopleRoutes(app, db);
   await registerSchedulingRoutes(app, db);
   await registerTurnRoutes(app, db);

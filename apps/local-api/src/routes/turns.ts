@@ -9,6 +9,12 @@ import {
 import type { DbClient } from "../db.js";
 import { asObject, getParams, handleRouteError, optionalString, requiredString } from "../http.js";
 
+type WorkSessionRecord = {
+  id: string;
+  businessDate: Date | string;
+  status: "open" | "closed";
+};
+
 type WorkerRecord = {
   id: string;
   displayName: string;
@@ -44,20 +50,33 @@ type CustomerRecord = {
 export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
   app.get("/api/turns/dashboard", async (_request, reply) => {
     try {
-      const workers = await loadDashboardWorkers(db);
+      const session = await loadCurrentOpenSession(db);
+      const workers = await loadDashboardWorkers(db, session?.id ?? null);
       const suggestions = rankSuggestedWorkers(workers.map(toRankingInput));
       const rankByWorker = new Map(suggestions.map((worker) => [worker.workerId, worker.suggestionRank]));
 
       return {
+        scope: "session" as const,
+        session: session
+          ? {
+              id: session.id,
+              businessDate: new Date(session.businessDate).toISOString(),
+              status: session.status,
+            }
+          : null,
         workers: workers.map((worker) => ({
           workerId: worker.id,
           name: worker.displayName,
           status: worker.currentStatus,
-          turnsTakenToday: countTurnsTaken(worker.turns ?? []),
+          turnsTakenSession: countTurnsTaken(worker.turns ?? []),
           lastTurnEndedAt: getLastTurnEndedAt(worker.turns ?? []),
           activeTurn: getActiveTurn(worker.turns ?? []),
-          salesTodayCents: getSalesTodayCents(worker.saleItems ?? []),
-          tipsTodayCents: getTipsTodayCents(worker.saleItems ?? []),
+          salesSessionCents: getSalesSessionCents(worker.saleItems ?? []),
+          tipsSessionCents: getTipsSessionCents(worker.saleItems ?? []),
+          // Compatibility aliases. Remove after client migration.
+          turnsTakenToday: countTurnsTaken(worker.turns ?? []),
+          salesTodayCents: getSalesSessionCents(worker.saleItems ?? []),
+          tipsTodayCents: getTipsSessionCents(worker.saleItems ?? []),
           suggestionRank: rankByWorker.get(worker.id) ?? null,
         })),
       };
@@ -68,7 +87,8 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
 
   app.post("/api/turns/suggest", async (_request, reply) => {
     try {
-      const workers = await loadDashboardWorkers(db);
+      const session = await loadCurrentOpenSession(db);
+      const workers = await loadDashboardWorkers(db, session?.id ?? null);
       return { workers: rankSuggestedWorkers(workers.map(toRankingInput)) };
     } catch (error) {
       return handleRouteError(error, reply);
@@ -79,9 +99,16 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
     try {
       const body = asObject(request.body);
       const result = await db.$transaction(async (tx) => {
+        const checkinId = requiredString(body.checkinId, "checkinId");
+        const checkins = (await tx.checkin.findMany({
+          where: { id: checkinId },
+          take: 1,
+        })) as Array<{ sessionId?: string | null }>;
+        const sessionId = checkins[0]?.sessionId ?? undefined;
         const turn = await tx.turn.create({
           data: {
-            checkinId: requiredString(body.checkinId, "checkinId"),
+            checkinId,
+            sessionId,
             workerId: requiredString(body.workerId, "workerId"),
             turnType: optionalString(body.turnType, "turnType") ?? "manual",
             suggestedWorkerId: optionalString(body.suggestedWorkerId, "suggestedWorkerId"),
@@ -91,7 +118,7 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
           },
         });
         const checkin = await tx.checkin.update({
-          where: { id: requiredString(body.checkinId, "checkinId") },
+          where: { id: checkinId },
           data: { status: "assigned" },
         });
 
@@ -110,7 +137,6 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
       const body = asObject(request.body ?? {});
       const now = getActionTime(body);
       const turnId = requiredString(params.id, "id");
-      const workerId = requiredString(body.workerId, "workerId");
       const checkinId = optionalString(body.checkinId, "checkinId");
 
       const result = await db.$transaction(async (tx) => {
@@ -118,15 +144,11 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
           where: { id: turnId },
           data: { status: "in_service", startedAt: now },
         });
-        const worker = await tx.worker.update({
-          where: { id: workerId },
-          data: { currentStatus: "in_service" },
-        });
         const checkin = checkinId
           ? await tx.checkin.update({ where: { id: checkinId }, data: { status: "in_service" } })
           : null;
 
-        return { turn, worker, checkin };
+        return { turn, checkin };
       });
 
       return result;
@@ -141,7 +163,6 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
       const body = asObject(request.body ?? {});
       const now = getActionTime(body);
       const turnId = requiredString(params.id, "id");
-      const workerId = requiredString(body.workerId, "workerId");
       const checkinId = optionalString(body.checkinId, "checkinId");
 
       const result = await db.$transaction(async (tx) => {
@@ -149,15 +170,11 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
           where: { id: turnId },
           data: { status: "completed", endedAt: now, completedAt: now },
         });
-        const worker = await tx.worker.update({
-          where: { id: workerId },
-          data: { currentStatus: "available" },
-        });
         const checkin = checkinId
           ? await tx.checkin.update({ where: { id: checkinId }, data: { status: "ready_for_checkout" } })
           : null;
 
-        return { turn, worker, checkin };
+        return { turn, checkin };
       });
 
       return result;
@@ -172,7 +189,6 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
       const body = asObject(request.body ?? {});
       const now = getActionTime(body);
       const turnId = requiredString(params.id, "id");
-      const workerId = optionalString(body.workerId, "workerId");
 
       const result = await db.$transaction(async (tx) => {
         const turn = await tx.turn.update({
@@ -183,11 +199,7 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
             skippedReason: optionalString(body.skippedReason, "skippedReason"),
           },
         });
-        const worker = workerId
-          ? await tx.worker.update({ where: { id: workerId }, data: { currentStatus: "available" } })
-          : null;
-
-        return { turn, worker };
+        return { turn };
       });
 
       return result;
@@ -197,18 +209,44 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
   });
 }
 
-async function loadDashboardWorkers(db: DbClient): Promise<WorkerRecord[]> {
-  const start = startOfToday();
-  const end = endOfToday(start);
+async function loadCurrentOpenSession(db: DbClient): Promise<WorkSessionRecord | null> {
+  const sessions = (await db.workSession.findMany({
+    where: { status: "open" },
+    orderBy: [{ openedAt: "desc" }],
+    take: 1,
+  })) as WorkSessionRecord[];
+  return sessions[0] ?? null;
+}
+
+async function loadDashboardWorkers(db: DbClient, sessionId: string | null): Promise<WorkerRecord[]> {
+  if (!sessionId) {
+    const workers = await db.worker.findMany({
+      where: { active: true },
+      orderBy: [{ sortOrder: "asc" }, { displayName: "asc" }],
+    });
+    return (workers as WorkerRecord[]).map((worker) => ({
+      ...worker,
+      turns: [],
+      saleItems: [],
+    }));
+  }
+
   const workers = await db.worker.findMany({
     where: { active: true },
     include: {
       turns: {
-        where: { createdAt: { gte: start, lt: end } },
+        where: {
+          OR: [{ checkin: { sessionId } }, { sessionId }],
+        },
         include: { customer: true, checkin: { include: { customer: true } } },
       },
       saleItems: {
-        where: { createdAt: { gte: start, lt: end }, status: "active" },
+        where: {
+          status: "active",
+          sale: {
+            OR: [{ checkin: { sessionId } }, { sessionId }],
+          },
+        },
       },
     },
     orderBy: [{ sortOrder: "asc" }, { displayName: "asc" }],
@@ -224,7 +262,7 @@ function toRankingInput(worker: WorkerRecord): WorkerRankingInput {
     status: worker.currentStatus,
     turnsTakenToday: countTurnsTaken(worker.turns ?? []),
     lastTurnEndedAt: getLastTurnEndedAt(worker.turns ?? []),
-    salesTodayCents: getSalesTodayCents(worker.saleItems ?? []),
+    salesTodayCents: getSalesSessionCents(worker.saleItems ?? []),
     activeTurn: getActiveTurn(worker.turns ?? []),
   };
 }
@@ -264,29 +302,17 @@ function getLastTurnEndedAt(turns: TurnRecord[]): Date | string | null {
   return completedTurns[0]?.endedAt ?? completedTurns[0]?.completedAt ?? null;
 }
 
-function getSalesTodayCents(items: SaleItemRecord[]): number {
+function getSalesSessionCents(items: SaleItemRecord[]): number {
   return items.reduce((sum, item) => sum + (item.finalServiceCents ?? 0), 0);
 }
 
-function getTipsTodayCents(items: SaleItemRecord[]): number {
+function getTipsSessionCents(items: SaleItemRecord[]): number {
   return items.reduce((sum, item) => sum + (item.tipCents ?? 0), 0);
 }
 
 function getActionTime(body: Record<string, unknown>): Date {
   const requested = optionalString(body.actionAt, "actionAt");
   return requested ? new Date(requested) : new Date();
-}
-
-function startOfToday(): Date {
-  const date = new Date();
-  date.setHours(0, 0, 0, 0);
-  return date;
-}
-
-function endOfToday(start: Date): Date {
-  const end = new Date(start);
-  end.setDate(end.getDate() + 1);
-  return end;
 }
 
 function toTime(value: Date | string | null | undefined): number {

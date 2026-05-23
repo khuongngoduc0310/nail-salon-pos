@@ -60,6 +60,11 @@ The Owner POS now drives a usable seeded demo day through the real local API and
 
 Run `corepack pnpm db:seed` after migrations to reset the demo day to known customers, workers, turns, appointments, and one completed paid sale for dashboard totals.
 
+Worker PWA demo login after seeding:
+
+- Worker IDs: fetch from `GET /api/workers` (for demo names Amy/Bella/Cindy).
+- Shared demo password: `1234`.
+
 ### Workspace layout
 
 ```text

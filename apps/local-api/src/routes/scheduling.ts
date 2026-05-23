@@ -30,6 +30,10 @@ const checkinStatuses = new Set([
   "no_show",
 ]);
 
+type WorkSessionRecord = {
+  id: string;
+};
+
 export async function registerSchedulingRoutes(app: FastifyInstance, db: DbClient) {
   app.post("/api/appointments", async (request, reply) => {
     try {
@@ -122,12 +126,29 @@ export async function registerSchedulingRoutes(app: FastifyInstance, db: DbClien
       const body = asObject(request.body);
       const checkin = await db.$transaction(async (tx) => {
         const customerId = await resolveCustomerId(tx, body);
+        const appointmentId = optionalString(body.appointmentId, "appointmentId");
+        const requestedWorkerId = optionalString(body.requestedWorkerId, "requestedWorkerId");
+        let sessionId: string | undefined;
+
+        if (!appointmentId) {
+          const sessions = (await tx.workSession.findMany({
+            where: { status: "open" },
+            orderBy: [{ openedAt: "desc" }],
+            take: 1,
+          })) as WorkSessionRecord[];
+          const openSession = sessions[0];
+          if (!openSession) {
+            throw new HttpError(409, "no open work session");
+          }
+          sessionId = openSession.id;
+        }
 
         return tx.checkin.create({
           data: {
+            sessionId,
             customerId,
-            appointmentId: optionalString(body.appointmentId, "appointmentId"),
-            requestedWorkerId: optionalString(body.requestedWorkerId, "requestedWorkerId"),
+            appointmentId,
+            requestedWorkerId,
             notes: optionalString(body.notes, "notes"),
             status: optionalStatus(body.status, checkinStatuses, "status") ?? "waiting",
           },

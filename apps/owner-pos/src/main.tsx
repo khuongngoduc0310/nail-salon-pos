@@ -1,32 +1,43 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
+  ApiError,
   addCustomSaleItem,
   addSaleItem,
   assignTurn,
+  closeWorkSession,
   completeSale,
   completeTurn,
+  createWorkerSessionCheckin,
   createEmptySale,
+  fetchCurrentSession,
+  fetchSessionReport,
   createSaleForCheckin,
   fetchCheckins,
   fetchSale,
   fetchServiceCategories,
   fetchTurnDashboard,
   fetchWorkers,
+  openWorkSession,
   recordCashPayment,
   recordGiftCardPayment,
   removeSaleItem,
   setTipDistribution,
   startCardPayment,
   startTurn,
+  updateWorkerStatus,
   updateSaleItem,
   type ActiveTurn,
+  type CheckedInWorker,
   type Checkin,
   type Sale,
   type SaleItem,
+  type SessionCandidate,
   type ServiceCategory,
   type TurnDashboardWorker,
+  type WorkSession,
   type Worker,
+  type WorkerStatus,
 } from "./api.js";
 import "./styles.css";
 
@@ -50,6 +61,8 @@ type NumpadState =
 
 type CustomServiceState = { open: false } | { open: true; name: string };
 
+const workerStatusOptions: WorkerStatus[] = ["available", "in_service", "on_break", "off_today", "appointment_only"];
+
 function customerName(c?: { name?: string | null; phone?: string | null } | null): string {
   if (!c) return "Guest";
   return c.name ?? c.phone ?? "Guest";
@@ -57,6 +70,11 @@ function customerName(c?: { name?: string | null; phone?: string | null } | null
 
 function formatMoney(cents: number): string {
   return "$" + (cents / 100).toFixed(2);
+}
+
+function formatSessionDate(value?: string | null): string {
+  if (!value) return "-";
+  return new Date(value).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
 }
 
 function digitsToDisplay(digits: string): string {
@@ -76,6 +94,9 @@ function App() {
   const [waitingCheckins, setWaitingCheckins] = useState<Checkin[]>([]);
   const [activeCheckins, setActiveCheckins] = useState<Checkin[]>([]);
   const [categories, setCategories] = useState<ServiceCategory[]>([]);
+  const [currentSession, setCurrentSession] = useState<WorkSession | null>(null);
+  const [checkedInWorkers, setCheckedInWorkers] = useState<CheckedInWorker[]>([]);
+  const [pendingSessionCandidate, setPendingSessionCandidate] = useState<SessionCandidate | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [statusMsg, setStatusMsg] = useState("Loading...");
   const [activeTab, setActiveTab] = useState<ActiveTab>("turns");
@@ -90,19 +111,25 @@ function App() {
 
   async function loadAll(message = "Connected.") {
     try {
-      const [dashboard, allWorkers, waiting, inService, readyForCheckout, catalog] = await Promise.all([
+      const [dashboard, allWorkers, waiting, inService, readyForCheckout, catalog, sessionInfo] = await Promise.all([
         fetchTurnDashboard(),
         fetchWorkers(),
         fetchCheckins("waiting"),
         fetchCheckins("in_service"),
         fetchCheckins("ready_for_checkout"),
         fetchServiceCategories(),
+        fetchCurrentSession(),
       ]);
       setDashboardWorkers(dashboard.workers);
       setWorkers(allWorkers.filter((w) => w.active));
       setWaitingCheckins(waiting);
       setActiveCheckins([...inService, ...readyForCheckout]);
       setCategories(catalog);
+      setCurrentSession(sessionInfo.session);
+      const workerCheckins =
+        sessionInfo.checkedInWorkers ??
+        (sessionInfo.checkedInWorkerIds ?? []).map((workerId) => ({ workerId, checkedInAt: null }));
+      setCheckedInWorkers(workerCheckins);
       setLoadState("ready");
       setStatusMsg(message);
     } catch (err) {
@@ -131,6 +158,85 @@ function App() {
       void loadAll(action === "start" ? "Service started." : "Service completed.");
     } catch (err) {
       setStatusMsg(err instanceof Error ? err.message : "Action failed.");
+    }
+  }
+
+  async function handleOwnerCheckin(workerId: string, notes: string) {
+    if (!currentSession) {
+      setStatusMsg("Open a session before worker check-in.");
+      return;
+    }
+    try {
+      await createWorkerSessionCheckin(currentSession.id, { workerId, notes });
+      void loadAll("Check-in created.");
+    } catch (err) {
+      setStatusMsg(err instanceof Error ? err.message : "Check-in failed.");
+    }
+  }
+
+  async function handleWorkerStatusChange(workerId: string, status: WorkerStatus) {
+    try {
+      await updateWorkerStatus(workerId, status);
+      void loadAll("Worker status updated.");
+    } catch (err) {
+      setStatusMsg(err instanceof Error ? err.message : "Status update failed.");
+    }
+  }
+
+  async function handleOpenSession() {
+    try {
+      const opened = await openWorkSession();
+      setPendingSessionCandidate(null);
+      void loadAll(
+        opened.openMode === "continue" ? "Continued last session." : "Session opened."
+      );
+    } catch (err) {
+      if (err instanceof ApiError && err.code === "CONTINUE_DECISION_REQUIRED") {
+        const data = (err.data ?? {}) as { candidateSession?: SessionCandidate };
+        setPendingSessionCandidate(data.candidateSession ?? null);
+        setStatusMsg("Choose continue or start new session.");
+        return;
+      }
+      setStatusMsg(err instanceof Error ? err.message : "Open session failed.");
+    }
+  }
+
+  async function handleResolveOpenSession(mode: "continue" | "new") {
+    try {
+      const opened = await openWorkSession({
+        mode,
+        sourceSessionId: mode === "continue" ? pendingSessionCandidate?.id : undefined,
+      });
+      setPendingSessionCandidate(null);
+      void loadAll(
+        opened.openMode === "continue"
+          ? "Continued last session."
+          : "Started a new session. Worker check-ins are renewed."
+      );
+    } catch (err) {
+      if (err instanceof ApiError && (err.code === "CANDIDATE_STALE" || err.code === "CONTINUE_DECISION_REQUIRED")) {
+        const data = (err.data ?? {}) as { candidateSession?: SessionCandidate };
+        setPendingSessionCandidate(data.candidateSession ?? null);
+        setStatusMsg("Session decision changed. Please choose again.");
+        return;
+      }
+      setStatusMsg(err instanceof Error ? err.message : "Open session failed.");
+    }
+  }
+
+  async function handleCloseSession() {
+    if (!currentSession) {
+      setStatusMsg("No open session.");
+      return;
+    }
+    try {
+      await closeWorkSession(currentSession.id);
+      const report = await fetchSessionReport(currentSession.id);
+      void loadAll(
+        `Session closed. Service ${formatMoney(report.summary.serviceCents)}, tip ${formatMoney(report.summary.tipCents)}, commission ${formatMoney(report.summary.commissionCents)}.`
+      );
+    } catch (err) {
+      setStatusMsg(err instanceof Error ? err.message : "Close session failed.");
     }
   }
 
@@ -170,8 +276,17 @@ function App() {
               assignments={assignments}
               setAssignments={setAssignments}
               suggestedWorker={suggestedWorker ?? null}
+              currentSession={currentSession}
+              checkedInWorkers={checkedInWorkers}
               onAssign={handleAssign}
               onTurnAction={handleTurnAction}
+              onWorkerStatusChange={handleWorkerStatusChange}
+              onCreateCheckin={handleOwnerCheckin}
+              onOpenSession={handleOpenSession}
+              onCloseSession={handleCloseSession}
+              pendingSessionCandidate={pendingSessionCandidate}
+              onResolveOpenSession={handleResolveOpenSession}
+              onDismissOpenSessionDecision={() => setPendingSessionCandidate(null)}
             />
           )}
           {activeTab === "checkout" && (
@@ -190,8 +305,40 @@ function App() {
 
 // ── Turns Tab ─────────────────────────────────────────────────────────────────
 
+type OptionPickerOption = {
+  value: string;
+  label: string;
+  hint?: string;
+  disabled?: boolean;
+};
+
+type OptionPickerState =
+  | {
+      context: { kind: "queue"; checkinId: string };
+      title: string;
+      subtitle?: string;
+      selectedValue: string;
+      options: OptionPickerOption[];
+    }
+  | {
+      context: { kind: "status"; workerId: string };
+      title: string;
+      subtitle?: string;
+      selectedValue: string;
+      options: OptionPickerOption[];
+    }
+  | {
+      context: { kind: "checkin" };
+      title: string;
+      subtitle?: string;
+      selectedValue: string;
+      options: OptionPickerOption[];
+    };
+
 function TurnsTab({
-  dashboardWorkers, workers, waitingCheckins, assignments, setAssignments, suggestedWorker, onAssign, onTurnAction,
+  dashboardWorkers, workers, waitingCheckins, assignments, setAssignments, suggestedWorker, currentSession, checkedInWorkers,
+  onAssign, onTurnAction, onWorkerStatusChange, onCreateCheckin, onOpenSession, onCloseSession, pendingSessionCandidate,
+  onResolveOpenSession, onDismissOpenSessionDecision,
 }: {
   dashboardWorkers: TurnDashboardWorker[];
   workers: Worker[];
@@ -199,14 +346,148 @@ function TurnsTab({
   assignments: Record<string, string>;
   setAssignments: React.Dispatch<React.SetStateAction<Record<string, string>>>;
   suggestedWorker: TurnDashboardWorker | null;
+  currentSession: WorkSession | null;
+  checkedInWorkers: CheckedInWorker[];
   onAssign: (c: Checkin) => Promise<void>;
   onTurnAction: (t: ActiveTurn, a: "start" | "complete") => Promise<void>;
+  onWorkerStatusChange: (workerId: string, status: WorkerStatus) => Promise<void>;
+  onCreateCheckin: (workerId: string, notes: string) => Promise<void>;
+  onOpenSession: () => Promise<void>;
+  onCloseSession: () => Promise<void>;
+  pendingSessionCandidate: SessionCandidate | null;
+  onResolveOpenSession: (mode: "continue" | "new") => Promise<void>;
+  onDismissOpenSessionDecision: () => void;
 }) {
+  const [checkinModalOpen, setCheckinModalOpen] = useState(false);
+  const [checkinWorkerId, setCheckinWorkerId] = useState("");
+  const [checkinNotes, setCheckinNotes] = useState("");
+  const [optionPicker, setOptionPicker] = useState<OptionPickerState | null>(null);
+  const checkedInWorkerIds = useMemo(() => checkedInWorkers.map((worker) => worker.workerId), [checkedInWorkers]);
+  const checkedInSet = useMemo(() => new Set(checkedInWorkerIds), [checkedInWorkerIds]);
+  const checkedInOrder = useMemo(
+    () => new Map(checkedInWorkerIds.map((workerId, index) => [workerId, index])),
+    [checkedInWorkerIds]
+  );
+  const workerById = useMemo(() => new Map(workers.map((worker) => [worker.id, worker])), [workers]);
+  const eligibleWorkers = useMemo(() => workers.filter((worker) => !checkedInSet.has(worker.id)), [workers, checkedInSet]);
+  const visibleDashboardWorkers = useMemo(
+    () =>
+      dashboardWorkers
+        .filter((worker) => checkedInSet.has(worker.workerId))
+        .sort((left, right) => (checkedInOrder.get(left.workerId) ?? Number.MAX_SAFE_INTEGER) - (checkedInOrder.get(right.workerId) ?? Number.MAX_SAFE_INTEGER)),
+    [dashboardWorkers, checkedInSet, checkedInOrder]
+  );
+
+  async function handleCreateCheckin() {
+    if (!currentSession) return;
+    const workerId = checkinWorkerId || eligibleWorkers[0]?.id;
+    if (!workerId) return;
+    await onCreateCheckin(workerId, checkinNotes);
+    setCheckinModalOpen(false);
+    setCheckinWorkerId("");
+    setCheckinNotes("");
+  }
+
+  function openQueueWorkerPicker(checkin: Checkin) {
+    const selectedValue = assignments[checkin.id] ?? suggestedWorker?.workerId ?? workers[0]?.id ?? "";
+    setOptionPicker({
+      context: { kind: "queue", checkinId: checkin.id },
+      title: "Select worker",
+      subtitle: customerName(checkin.customer),
+      selectedValue,
+      options: workers.map((worker) => ({
+        value: worker.id,
+        label: worker.displayName,
+        hint: suggestedWorker?.workerId === worker.id ? "Suggested" : undefined,
+      })),
+    });
+  }
+
+  function openStatusPicker(worker: TurnDashboardWorker) {
+    setOptionPicker({
+      context: { kind: "status", workerId: worker.workerId },
+      title: "Set worker status",
+      subtitle: worker.name,
+      selectedValue: worker.status,
+      options: workerStatusOptions.map((status) => ({
+        value: status,
+        label: status.replace(/_/g, " "),
+      })),
+    });
+  }
+
+  function openCheckinWorkerPicker() {
+    setOptionPicker({
+      context: { kind: "checkin" },
+      title: "Select checked-in worker",
+      subtitle: "Worker shift check-in",
+      selectedValue: checkinWorkerId || eligibleWorkers[0]?.id || "",
+      options: eligibleWorkers.map((worker) => ({
+        value: worker.id,
+        label: worker.displayName,
+      })),
+    });
+  }
+
+  async function handleConfirmOptionPicker() {
+    if (!optionPicker || !optionPicker.selectedValue) return;
+    const selectedValue = optionPicker.selectedValue;
+    const context = optionPicker.context;
+    setOptionPicker(null);
+    if (context.kind === "queue") {
+      setAssignments((prev) => ({ ...prev, [context.checkinId]: selectedValue }));
+      return;
+    }
+    if (context.kind === "status") {
+      await onWorkerStatusChange(context.workerId, selectedValue as WorkerStatus);
+      return;
+    }
+    setCheckinWorkerId(selectedValue);
+  }
+
   return (
     <div className="turns-tab">
+      <section className="session-bar">
+        <div className="session-meta">
+          <strong>{currentSession ? "Session open" : "No open session"}</strong>
+          <span>
+            {currentSession
+              ? `Business date: ${formatSessionDate(currentSession.businessDate)}`
+              : "Open a session before worker check-in."}
+          </span>
+        </div>
+        <div className="session-actions">
+          {!currentSession ? (
+            <button type="button" className="secondary small" onClick={() => void onOpenSession()}>
+              Open session
+            </button>
+          ) : (
+            <button type="button" className="secondary small" onClick={() => void onCloseSession()}>
+              Close session
+            </button>
+          )}
+        </div>
+      </section>
+
+      <section className="queue-section">
+        <div className="queue-head">
+          <h2>Waiting queue</h2>
+          <button
+            type="button"
+            className="secondary small"
+            disabled={!currentSession}
+            onClick={() => {
+              setCheckinWorkerId(eligibleWorkers[0]?.id ?? "");
+              setCheckinModalOpen(true);
+            }}
+          >
+            Worker shift check-in
+          </button>
+        </div>
+      </section>
+
       {waitingCheckins.length > 0 && (
         <section className="queue-section">
-          <h2>Waiting queue</h2>
           <ul className="queue-list">
             {waitingCheckins.map((c) => (
               <li key={c.id} className="queue-item">
@@ -220,18 +501,18 @@ function TurnsTab({
                   )}
                 </div>
                 <div className="queue-controls">
-                  <select
-                    value={assignments[c.id] ?? (suggestedWorker?.workerId ?? "")}
-                    onChange={(e) => setAssignments((prev) => ({ ...prev, [c.id]: e.target.value }))}
+                  <button
+                    type="button"
+                    className="secondary picker-trigger picker-trigger--queue"
+                    onClick={() => openQueueWorkerPicker(c)}
+                    disabled={workers.length === 0}
                   >
-                    <option value="">— select worker —</option>
-                    {workers.map((w) => (
-                      <option key={w.id} value={w.id}>
-                        {w.displayName}{suggestedWorker?.workerId === w.id ? " ★" : ""}
-                      </option>
-                    ))}
-                  </select>
-                  <button type="button" onClick={() => void onAssign(c)}>Assign</button>
+                    <span className="picker-trigger-label">
+                      {workerById.get(assignments[c.id] ?? (suggestedWorker?.workerId ?? ""))?.displayName ?? "Select worker"}
+                    </span>
+                    <span className="picker-trigger-meta">Choose</span>
+                  </button>
+                  <button type="button" className="queue-assign-btn" onClick={() => void onAssign(c)}>Assign</button>
                 </div>
               </li>
             ))}
@@ -240,7 +521,12 @@ function TurnsTab({
       )}
 
       <section className="turns-section">
-        <h2>Worker turns today</h2>
+        <h2>Worker turns this session</h2>
+        <p className="checkin-hint">
+          {currentSession
+            ? `Session ${formatSessionDate(currentSession.businessDate)} is open.`
+            : "Open session to track session turns."}
+        </p>
         <div className="turns-table-wrap">
           <table className="turns-table">
             <thead>
@@ -255,9 +541,12 @@ function TurnsTab({
               </tr>
             </thead>
             <tbody>
-              {dashboardWorkers.map((w) => {
+              {visibleDashboardWorkers.map((w) => {
                 const inServiceNow = w.activeTurn?.status === "in_service" ? 1 : 0;
-                const doneCount = Math.max(0, w.turnsTakenToday - inServiceNow);
+                const turnsTaken = w.turnsTakenSession ?? w.turnsTakenToday;
+                const salesCents = w.salesSessionCents ?? w.salesTodayCents;
+                const tipsCents = w.tipsSessionCents ?? w.tipsTodayCents;
+                const doneCount = Math.max(0, turnsTaken - inServiceNow);
                 return (
                   <tr key={w.workerId}>
                     <td>
@@ -265,20 +554,30 @@ function TurnsTab({
                       {w.suggestionRank === 1 && <span className="next-up-badge">Next up</span>}
                     </td>
                     <td>
-                      <span className={"status-pill s-" + w.status}>{w.status.replace(/_/g, " ")}</span>
+                      <div className="status-cell">
+                        <span className={"status-pill s-" + w.status}>{w.status.replace(/_/g, " ")}</span>
+                        <button
+                          type="button"
+                          className="secondary picker-trigger picker-trigger--status"
+                          onClick={() => openStatusPicker(w)}
+                        >
+                          <span className="picker-trigger-label">{w.status.replace(/_/g, " ")}</span>
+                          <span className="picker-trigger-meta">Change</span>
+                        </button>
+                      </div>
                     </td>
-                    <td className="center-col">{w.turnsTakenToday}</td>
+                    <td className="center-col">{turnsTaken}</td>
                     <td>
                       <div className="sq-wrap">
                         {Array.from({ length: doneCount }).map((_, i) => (
                           <span key={"d" + i} className="sq sq-done" title="Completed" />
                         ))}
                         {inServiceNow > 0 && <span className="sq sq-active" title="In service" />}
-                        {w.turnsTakenToday === 0 && <span className="sq-none">—</span>}
+                        {turnsTaken === 0 && <span className="sq-none">-</span>}
                       </div>
                     </td>
-                    <td className="right-col">{formatMoney(w.salesTodayCents)}</td>
-                    <td className="right-col">{formatMoney(w.tipsTodayCents)}</td>
+                    <td className="right-col">{formatMoney(salesCents)}</td>
+                    <td className="right-col">{formatMoney(tipsCents)}</td>
                     <td>
                       {w.activeTurn?.status === "assigned" && (
                         <button type="button" className="small" onClick={() => void onTurnAction(w.activeTurn!, "start")}>
@@ -297,16 +596,152 @@ function TurnsTab({
             </tbody>
           </table>
         </div>
+        {currentSession && visibleDashboardWorkers.length === 0 && (
+          <p className="checkin-hint">No checked-in workers for this session yet.</p>
+        )}
         <p className="sq-legend">
           <span className="sq sq-done" style={{ display: "inline-block" }} /> Completed &nbsp;
           <span className="sq sq-active" style={{ display: "inline-block" }} /> In service
         </p>
       </section>
+
+      {checkinModalOpen && (
+        <div className="numpad-overlay" onClick={(e) => { if (e.target === e.currentTarget) setCheckinModalOpen(false); }}>
+          <div className="numpad-modal checkin-modal">
+            <p className="numpad-label">Worker shift check-in</p>
+            {!currentSession && <p className="checkin-hint">Open a session before checking in workers.</p>}
+            <label className="checkin-label">
+              Worker
+              <button
+                type="button"
+                className="secondary picker-trigger picker-trigger--checkin"
+                onClick={openCheckinWorkerPicker}
+                disabled={!currentSession || eligibleWorkers.length === 0}
+              >
+                <span className="picker-trigger-label">
+                  {workerById.get(checkinWorkerId)?.displayName ?? "Select worker"}
+                </span>
+                <span className="picker-trigger-meta">Choose</span>
+              </button>
+            </label>
+            {currentSession && eligibleWorkers.length === 0 && (
+              <p className="checkin-hint">All workers already checked in for this session.</p>
+            )}
+            <label className="checkin-label">
+              Shift note (optional)
+              <input
+                type="text"
+                value={checkinNotes}
+                onChange={(e) => setCheckinNotes(e.target.value)}
+                placeholder="Notes"
+              />
+            </label>
+            <div className="numpad-actions">
+              <button type="button" className="secondary" onClick={() => setCheckinModalOpen(false)}>Cancel</button>
+              <button
+                type="button"
+                className="numpad-confirm"
+                disabled={!currentSession || !checkinWorkerId || eligibleWorkers.length === 0}
+                onClick={() => void handleCreateCheckin()}
+              >
+                Check in
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pendingSessionCandidate && (
+        <div className="numpad-overlay" onClick={(e) => { if (e.target === e.currentTarget) onDismissOpenSessionDecision(); }}>
+          <div className="numpad-modal checkin-modal session-decision-modal">
+            <p className="numpad-label">Session found for today</p>
+            <p className="checkin-hint">
+              A closed session from {formatSessionDate(pendingSessionCandidate.businessDate)} exists.
+            </p>
+            <p className="checkin-hint">
+              Continue keeps current check-ins and session totals. Start new renews worker check-in eligibility.
+            </p>
+            <div className="numpad-actions session-decision-actions">
+              <button type="button" className="secondary" onClick={onDismissOpenSessionDecision}>Cancel</button>
+              <button type="button" className="numpad-confirm" onClick={() => void onResolveOpenSession("continue")}>
+                Continue last session
+              </button>
+              <button type="button" className="secondary" onClick={() => void onResolveOpenSession("new")}>
+                Start new session
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {optionPicker && (
+        <OptionPickerModal
+          title={optionPicker.title}
+          subtitle={optionPicker.subtitle}
+          options={optionPicker.options}
+          selectedValue={optionPicker.selectedValue}
+          onSelect={(value) => setOptionPicker((prev) => (prev ? { ...prev, selectedValue: value } : prev))}
+          onCancel={() => setOptionPicker(null)}
+          onConfirm={() => void handleConfirmOptionPicker()}
+        />
+      )}
     </div>
   );
 }
 
 // ── Checkout Tab ──────────────────────────────────────────────────────────────
+
+function OptionPickerModal({
+  title,
+  subtitle,
+  options,
+  selectedValue,
+  onSelect,
+  onCancel,
+  onConfirm,
+}: {
+  title: string;
+  subtitle?: string;
+  options: OptionPickerOption[];
+  selectedValue: string;
+  onSelect: (value: string) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const selectedOption = options.find((option) => option.value === selectedValue && !option.disabled);
+  return (
+    <div className="numpad-overlay option-picker-overlay" onClick={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
+      <div className="numpad-modal option-picker-modal">
+        <p className="numpad-label">{title}</p>
+        {subtitle && <p className="checkin-hint option-picker-sub">{subtitle}</p>}
+        {options.length > 0 ? (
+          <div className="option-picker-grid">
+            {options.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                className={"option-picker-btn" + (option.value === selectedValue ? " selected" : "")}
+                disabled={option.disabled}
+                onClick={() => onSelect(option.value)}
+              >
+                <span className="option-picker-label">{option.label}</span>
+                {option.hint && <span className="option-picker-hint">{option.hint}</span>}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="checkin-hint">No options available.</p>
+        )}
+        <div className="numpad-actions option-picker-actions">
+          <button type="button" className="secondary" onClick={onCancel}>Cancel</button>
+          <button type="button" className="numpad-confirm" disabled={!selectedOption} onClick={onConfirm}>
+            Confirm
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function CheckoutTab({
   workers, activeCheckins, categories, onRefresh,

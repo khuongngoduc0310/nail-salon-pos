@@ -1,6 +1,8 @@
 import { PrismaClient } from "@prisma/client";
+import { randomBytes, scryptSync } from "node:crypto";
 
 const prisma = new PrismaClient();
+const SEEDED_WORKER_PASSWORD = "1234";
 
 const ids = {
   owner: "00000000-0000-0000-0000-000000000001",
@@ -83,11 +85,13 @@ async function seedWorkers() {
   const workers = [];
 
   for (const worker of workerInputs) {
+    const passwordHash = hashSecret(SEEDED_WORKER_PASSWORD);
     const user = await prisma.user.upsert({
       where: { email: worker.email },
       update: {
         name: worker.name,
         role: "worker",
+        passwordHash,
         pinHash: "dev-pin-placeholder",
         active: true,
       },
@@ -95,6 +99,7 @@ async function seedWorkers() {
         name: worker.name,
         email: worker.email,
         role: "worker",
+        passwordHash,
         pinHash: "dev-pin-placeholder",
       },
     });
@@ -121,6 +126,12 @@ async function seedWorkers() {
   }
 
   return workers;
+}
+
+function hashSecret(secret: string): string {
+  const salt = randomBytes(16).toString("hex");
+  const key = scryptSync(secret, salt, 64).toString("hex");
+  return `${salt}:${key}`;
 }
 
 async function seedCatalog() {

@@ -35,6 +35,16 @@ export type DbClient = {
     create(args: unknown): Promise<unknown>;
     update(args: unknown): Promise<unknown>;
   };
+  workSession: {
+    findMany(args?: unknown): Promise<unknown[]>;
+    findUnique(args: unknown): Promise<unknown | null>;
+    create(args: unknown): Promise<unknown>;
+    update(args: unknown): Promise<unknown>;
+  };
+  workerSessionCheckin: {
+    findMany(args?: unknown): Promise<unknown[]>;
+    create(args: unknown): Promise<unknown>;
+  };
   turn: {
     findMany(args?: unknown): Promise<unknown[]>;
     create(args: unknown): Promise<unknown>;

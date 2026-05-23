@@ -131,6 +131,13 @@ enum GiftCardTxType {
   @@map("gift_card_tx_type")
 }
 
+enum WorkSessionStatus {
+  open
+  closed
+
+  @@map("work_session_status")
+}
+
 model User {
   id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   name         String
@@ -166,6 +173,7 @@ model Worker {
   turns          Turn[]       @relation("TurnWorker")
   suggestedTurns Turn[]       @relation("SuggestedWorker")
   saleItems      SaleItem[]
+  sessionCheckins WorkerSessionCheckin[]
 
   @@map("workers")
 }
@@ -256,6 +264,7 @@ model AppointmentService {
 
 model Checkin {
   id                String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionId         String?       @map("session_id") @db.Uuid
   customerId        String?       @map("customer_id") @db.Uuid
   appointmentId     String?       @map("appointment_id") @db.Uuid
   status            CheckinStatus @default(waiting)
@@ -264,6 +273,7 @@ model Checkin {
   checkedInAt       DateTime      @default(now()) @map("checked_in_at") @db.Timestamptz
   updatedAt         DateTime      @default(now()) @map("updated_at") @db.Timestamptz
 
+  session         WorkSession? @relation(fields: [sessionId], references: [id])
   customer        Customer?    @relation(fields: [customerId], references: [id])
   appointment     Appointment? @relation(fields: [appointmentId], references: [id])
   requestedWorker Worker?      @relation("RequestedWorker", fields: [requestedWorkerId], references: [id])
@@ -271,12 +281,51 @@ model Checkin {
   sales           Sale[]
 
   @@index([status, checkedInAt])
+  @@index([sessionId])
   @@map("checkins")
+}
+
+model WorkSession {
+  id             String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessDate   DateTime          @map("business_date") @db.Timestamptz
+  status         WorkSessionStatus @default(open)
+  openedAt       DateTime          @default(now()) @map("opened_at") @db.Timestamptz
+  closedAt       DateTime?         @map("closed_at") @db.Timestamptz
+  openedByUserId String?           @map("opened_by_user_id") @db.Uuid
+  closedByUserId String?           @map("closed_by_user_id") @db.Uuid
+  createdAt      DateTime          @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime          @default(now()) @map("updated_at") @db.Timestamptz
+
+  checkins       Checkin[]
+  workerCheckins WorkerSessionCheckin[]
+  turns          Turn[]
+  sales          Sale[]
+
+  @@index([status, businessDate])
+  @@map("work_sessions")
+}
+
+model WorkerSessionCheckin {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionId   String   @map("session_id") @db.Uuid
+  workerId    String   @map("worker_id") @db.Uuid
+  notes       String?
+  checkedInAt DateTime @default(now()) @map("checked_in_at") @db.Timestamptz
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt   DateTime @default(now()) @map("updated_at") @db.Timestamptz
+
+  session WorkSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  worker  Worker      @relation(fields: [workerId], references: [id])
+
+  @@unique([sessionId, workerId])
+  @@index([sessionId, checkedInAt])
+  @@map("worker_session_checkins")
 }
 
 model Turn {
   id                  String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   workerId            String     @map("worker_id") @db.Uuid
+  sessionId           String?    @map("session_id") @db.Uuid
   customerId          String?    @map("customer_id") @db.Uuid
   checkinId           String?    @map("checkin_id") @db.Uuid
   appointmentId       String?    @map("appointment_id") @db.Uuid
@@ -295,6 +344,7 @@ model Turn {
   updatedAt           DateTime   @default(now()) @map("updated_at") @db.Timestamptz
 
   worker          Worker       @relation("TurnWorker", fields: [workerId], references: [id])
+  session         WorkSession? @relation(fields: [sessionId], references: [id])
   customer        Customer?    @relation(fields: [customerId], references: [id])
   checkin         Checkin?     @relation(fields: [checkinId], references: [id])
   appointment     Appointment? @relation(fields: [appointmentId], references: [id])
@@ -302,12 +352,14 @@ model Turn {
   suggestedWorker Worker?      @relation("SuggestedWorker", fields: [suggestedWorkerId], references: [id])
 
   @@index([workerId, status])
+  @@index([sessionId])
   @@index([startedAt])
   @@map("turns")
 }
 
 model Sale {
   id                 String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionId          String?    @map("session_id") @db.Uuid
   customerId         String?    @map("customer_id") @db.Uuid
   appointmentId      String?    @map("appointment_id") @db.Uuid
   checkinId          String?    @map("checkin_id") @db.Uuid
@@ -324,6 +376,7 @@ model Sale {
   createdAt          DateTime   @default(now()) @map("created_at") @db.Timestamptz
   updatedAt          DateTime   @default(now()) @map("updated_at") @db.Timestamptz
 
+  session     WorkSession? @relation(fields: [sessionId], references: [id])
   customer    Customer?    @relation(fields: [customerId], references: [id])
   appointment Appointment? @relation(fields: [appointmentId], references: [id])
   checkin     Checkin?     @relation(fields: [checkinId], references: [id])
@@ -334,6 +387,7 @@ model Sale {
   discounts   Discount[]
   receipts    Receipt[]
 
+  @@index([sessionId])
   @@index([completedAt])
   @@map("sales")
 }

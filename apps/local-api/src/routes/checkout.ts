@@ -35,9 +35,11 @@ type WorkerRecord = {
 type SaleRecord = {
   id: string;
   checkinId?: string | null;
+  sessionId?: string | null;
   customerId?: string | null;
   status?: string;
   totalCents: number;
+  checkin?: { sessionId?: string | null } | null;
   items?: SaleItemRecord[];
   payments?: PaymentRecord[];
 };
@@ -75,20 +77,25 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
   app.post("/api/sales", async (request, reply) => {
     try {
       const body = asObject(request.body);
-      const sale = await db.sale.create({
-        data: {
-          customerId: optionalString(body.customerId, "customerId"),
-          appointmentId: optionalString(body.appointmentId, "appointmentId"),
-          checkinId: optionalString(body.checkinId, "checkinId"),
-          status: "open",
-          subtotalCents: 0,
-          discountTotalCents: 0,
-          taxTotalCents: 0,
-          tipTotalCents: 0,
-          totalCents: 0,
-          amountPaidCents: 0,
-          createdByUserId: optionalString(body.createdByUserId, "createdByUserId"),
-        },
+      const checkinId = optionalString(body.checkinId, "checkinId");
+      const sale = await db.$transaction(async (tx) => {
+        const sessionId = await resolveSaleSessionId(tx, checkinId);
+        return tx.sale.create({
+          data: {
+            sessionId,
+            customerId: optionalString(body.customerId, "customerId"),
+            appointmentId: optionalString(body.appointmentId, "appointmentId"),
+            checkinId,
+            status: "open",
+            subtotalCents: 0,
+            discountTotalCents: 0,
+            taxTotalCents: 0,
+            tipTotalCents: 0,
+            totalCents: 0,
+            amountPaidCents: 0,
+            createdByUserId: optionalString(body.createdByUserId, "createdByUserId"),
+          },
+        });
       });
 
       return reply.code(201).send(sale);
@@ -389,10 +396,12 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
           },
         });
         const workerIds = [...new Set((sale.items ?? []).map((item) => item.workerId).filter(Boolean))] as string[];
+        const turnSessionId = sale.checkin?.sessionId ?? sale.sessionId ?? undefined;
         for (const workerId of workerIds) {
           await tx.turn.create({
             data: {
               workerId,
+              sessionId: turnSessionId,
               customerId: sale.customerId ?? undefined,
               checkinId: sale.checkinId ?? undefined,
               saleId,
@@ -507,4 +516,21 @@ function requireRecord<T>(record: unknown | null, message: string): T {
   }
 
   return record as T;
+}
+
+async function resolveSaleSessionId(db: DbClient, checkinId: string | undefined): Promise<string | undefined> {
+  if (checkinId) {
+    const checkins = (await db.checkin.findMany({
+      where: { id: checkinId },
+      take: 1,
+    })) as Array<{ sessionId?: string | null }>;
+    return checkins[0]?.sessionId ?? undefined;
+  }
+
+  const sessions = (await db.workSession.findMany({
+    where: { status: "open" },
+    orderBy: [{ openedAt: "desc" }],
+    take: 1,
+  })) as Array<{ id: string }>;
+  return sessions[0]?.id;
 }

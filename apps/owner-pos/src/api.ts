@@ -14,6 +14,8 @@ export type Worker = {
   active: boolean;
 };
 
+export type WorkerStatus = "available" | "in_service" | "on_break" | "off_today" | "appointment_only";
+
 export type Service = {
   id: string;
   categoryId: string;
@@ -46,9 +48,12 @@ export type TurnDashboardWorker = {
   workerId: string;
   name: string;
   status: string;
+  turnsTakenSession: number;
   turnsTakenToday: number;
   lastTurnEndedAt: string | null;
   activeTurn: ActiveTurn | null;
+  salesSessionCents: number;
+  tipsSessionCents: number;
   salesTodayCents: number;
   tipsTodayCents: number;
   suggestionRank: number | null;
@@ -103,7 +108,55 @@ export type Sale = {
   customer?: Customer | null;
 };
 
-export async function fetchTurnDashboard(): Promise<{ workers: TurnDashboardWorker[] }> {
+export type WorkSession = {
+  id: string;
+  businessDate: string;
+  status: "open" | "closed";
+  openedAt: string;
+  closedAt?: string | null;
+};
+
+export type CheckedInWorker = {
+  workerId: string;
+  checkedInAt: string | null;
+};
+
+export type CurrentSessionResponse = {
+  session: WorkSession | null;
+  checkedInWorkerIds: string[];
+  checkedInWorkers: CheckedInWorker[];
+};
+
+export type SessionOpenMode = "continue" | "new";
+
+export type SessionCandidate = WorkSession & {
+  checkedInWorkerCount: number;
+};
+
+export type OpenSessionResponse = CurrentSessionResponse & {
+  openMode?: SessionOpenMode;
+  reopenedFromClosed?: boolean;
+};
+
+export class ApiError extends Error {
+  readonly code?: string;
+  readonly data?: unknown;
+  readonly status?: number;
+
+  constructor(message: string, options?: { code?: string; data?: unknown; status?: number }) {
+    super(message);
+    this.name = "ApiError";
+    this.code = options?.code;
+    this.data = options?.data;
+    this.status = options?.status;
+  }
+}
+
+export async function fetchTurnDashboard(): Promise<{
+  scope: "session";
+  session: WorkSession | null;
+  workers: TurnDashboardWorker[];
+}> {
   return fetchJson("/turns/dashboard");
 }
 
@@ -125,6 +178,62 @@ export async function fetchWaitingCheckins(): Promise<Checkin[]> {
 
 export async function fetchReadyForCheckoutCheckins(): Promise<Checkin[]> {
   return fetchCheckins("ready_for_checkout");
+}
+
+export async function fetchCurrentSession(): Promise<CurrentSessionResponse> {
+  return fetchJson("/sessions/current");
+}
+
+export async function openWorkSession(input?: { mode?: SessionOpenMode; sourceSessionId?: string }) {
+  return fetchJson<OpenSessionResponse>("/sessions/open", {
+    method: "POST",
+    body: JSON.stringify({
+      mode: input?.mode,
+      sourceSessionId: input?.sourceSessionId,
+    }),
+  });
+}
+
+export async function closeWorkSession(sessionId: string) {
+  return fetchJson<{ session: WorkSession; blockers: { unresolvedCheckinsCount: number; unresolvedSalesCount: number } }>(
+    "/sessions/" + encodeURIComponent(sessionId) + "/close",
+    { method: "POST", body: "{}" }
+  );
+}
+
+export async function fetchSessionReport(sessionId: string) {
+  return fetchJson<{
+    session: WorkSession;
+    summary: {
+      checkinsCount: number;
+      resolvedCheckinsCount: number;
+      turnsCount: number;
+      completedTurnsCount: number;
+      salesCount: number;
+      paidSalesCount: number;
+      serviceCents: number;
+      tipCents: number;
+      commissionCents: number;
+      collectedCents: number;
+    };
+  }>("/sessions/" + encodeURIComponent(sessionId) + "/report");
+}
+
+export async function createWorkerSessionCheckin(sessionId: string, input: { workerId: string; notes?: string }) {
+  return fetchJson("/sessions/" + encodeURIComponent(sessionId) + "/workers/checkin", {
+    method: "POST",
+    body: JSON.stringify({
+      notes: input.notes?.trim() || undefined,
+      workerId: input.workerId,
+    }),
+  });
+}
+
+export async function updateWorkerStatus(workerId: string, status: WorkerStatus) {
+  return fetchJson<Worker>("/workers/" + encodeURIComponent(workerId) + "/status", {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
+  });
 }
 
 export async function assignTurn(checkinId: string, workerId: string, suggestedWorkerId?: string | null) {
@@ -239,8 +348,30 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
   if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || "Request failed: " + response.status);
+    let message = "Request failed: " + response.status;
+    let errorCode: string | undefined;
+    let parsedData: unknown;
+    try {
+      const data = (await response.json()) as {
+        error?: string;
+        errorCode?: string;
+        blockers?: { unresolvedCheckinsCount?: number; unresolvedSalesCount?: number };
+      };
+      parsedData = data;
+      if (data.error) {
+        message = data.error;
+      }
+      if (data.errorCode) {
+        errorCode = data.errorCode;
+      }
+      if (data.blockers) {
+        message += ` (check-ins: ${data.blockers.unresolvedCheckinsCount ?? 0}, sales: ${data.blockers.unresolvedSalesCount ?? 0})`;
+      }
+    } catch {
+      const text = await response.text();
+      if (text) message = text;
+    }
+    throw new ApiError(message, { code: errorCode, data: parsedData, status: response.status });
   }
   return response.json() as Promise<T>;
 }
