@@ -65,6 +65,70 @@ Worker PWA demo login after seeding:
 - Worker IDs: fetch from `GET /api/workers` (for demo names Amy/Bella/Cindy).
 - Shared demo password: `1234`.
 
+## Sixth milestone owner reports
+
+The local API and Owner POS now support owner-only reports with a compact mobile-friendly reports tab:
+
+- Owner login: `POST /api/owner/login`
+- Summary report: `GET /api/reports/summary`
+- Sales report: `GET /api/reports/sales`
+- Worker earnings report: `GET /api/reports/workers`
+- Turn report: `GET /api/reports/turns`
+- Payment method report: `GET /api/reports/payments`
+- Discount report: `GET /api/reports/discounts`
+- Refund report: `GET /api/reports/refunds`
+
+Seeded owner demo login after seeding:
+
+- Email: `owner@example.com`
+- Password: `1234`
+
+## Seventh milestone receipts MVP
+
+The local API and Owner POS now support receipt generation through the receipt printer adapter:
+
+- List sale receipts: `GET /api/sales/:id/receipts`
+- Print a paid sale receipt: `POST /api/sales/:id/receipts/print`
+- Reprint a snapshotted receipt: `POST /api/sales/:id/receipts/:receiptId/reprint`
+
+Receipt documents snapshot salon placeholders, receipt number, issue time, customer, services, workers, totals, payment breakdown, and card references when present. The current implementation uses the mock printer adapter for local development and persists receipt rows for reprint.
+
+## Eighth milestone customer phone-first MVP
+
+Customer access now supports a simple phone-first login and self-service mobile flow:
+
+- `Customer.phone` is the unique login identity key (normalized phone format)
+- `POST /api/customer/auth/start` signs in or creates customer by phone
+- `GET/POST /api/customer/me/appointments`
+- `GET/POST /api/customer/me/checkins`
+
+The Customer PWA now includes:
+
+- Phone sign-in
+- Appointment booking
+- Walk-in or appointment check-in
+- Personal appointment/check-in status history
+
+## Ninth milestone refund recording
+
+The local API now records owner-initiated refunds and feeds those rows into reports:
+
+- Record a refund: `POST /api/sales/:id/refunds`
+- Refund reports: `GET /api/reports/refunds`
+- Summary reports subtract recorded refunds from net service, business share, and total collected
+
+Mock terminal refunds are supported for local testing. Live Clover refunds remain part of the Clover adapter milestone.
+
+## Current finish line
+
+This repo is now a complete local MVP for seeded single-store operations: local API, Prisma schema, Owner POS, Worker PWA, Customer PWA, mock card terminal, receipt adapter, reports, refunds, and phone-first customer access. The remaining milestones are integration hardening, not required for local demo completion:
+
+- Live Clover Mini adapter and reconciliation
+- ESC/POS or browser printer adapter
+- SMS/email receipt queue
+- Cloud sync and conflict review
+- Broader owner role guards around every mutating local endpoint
+
 ### Workspace layout
 
 ```text
@@ -175,8 +239,9 @@ Read this repository. Treat docs/PRODUCT_REQUIREMENTS.md, docs/ARCHITECTURE.md, 
 10. Receipt printing adapter.
 11. Worker PWA.
 12. Customer booking/check-in PWA.
-13. Clover Mini integration adapter.
-14. Cloud sync.
+13. Refund recording.
+14. Clover Mini integration adapter.
+15. Cloud sync.
 
 ## Non-negotiable rules
 

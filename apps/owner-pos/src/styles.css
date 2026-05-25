@@ -72,7 +72,7 @@ button.small {
   font-size: 0.82rem;
 }
 
-select, input[type="text"], input[type="number"] {
+select, input[type="text"], input[type="number"], input[type="password"], input[type="datetime-local"] {
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 0.5rem 0.7rem;
@@ -197,6 +197,7 @@ select, input[type="text"], input[type="number"] {
   border-bottom: 1px solid var(--line);
   background: rgba(255,250,240,0.8);
   padding: 0 20px;
+  overflow-x: auto;
 }
 
 .tab-btn {
@@ -542,6 +543,56 @@ select, input[type="text"], input[type="number"] {
   flex-direction: column;
   align-items: center;
   gap: 10px;
+}
+
+.receipt-panel {
+  width: min(560px, 100%);
+  margin: 0 auto;
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: rgba(255,250,240,0.9);
+}
+
+.receipt-panel-head,
+.receipt-history-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.receipt-panel-head div,
+.receipt-history-row div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.receipt-panel-head strong,
+.receipt-history-row strong {
+  color: var(--green-dark);
+  font-size: 0.95rem;
+}
+
+.receipt-panel-head span,
+.receipt-history-row span {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.receipt-history {
+  display: grid;
+  gap: 8px;
+}
+
+.receipt-history-row {
+  padding: 9px 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(222,214,199,0.7);
+  background: rgba(255,255,255,0.55);
 }
 
 /* Checkout columns */
@@ -1364,7 +1415,243 @@ select, input[type="text"], input[type="number"] {
   grid-template-columns: 1fr 1fr;
 }
 
+/* Reports */
+
+.reports-tab {
+  padding: 14px 20px 20px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.reports-auth-wrap {
+  align-items: center;
+  justify-content: flex-start;
+  padding-top: 28px;
+}
+
+.reports-auth {
+  width: min(420px, 100%);
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: rgba(255,250,240,0.9);
+}
+
+.reports-auth label,
+.custom-range label {
+  display: grid;
+  gap: 6px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.reports-toolbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.reports-toolbar h2 {
+  margin-bottom: 3px;
+}
+
+.reports-range-label {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.range-panel {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 10px;
+  background: rgba(255,255,255,0.52);
+}
+
+.quick-range,
+.report-segments {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.range-btn,
+.report-segments button {
+  border-radius: 12px;
+  min-height: 42px;
+  padding: 0.5rem 0.8rem;
+  background: rgba(255,255,255,0.68);
+  color: var(--green);
+  border: 1px solid rgba(40, 92, 77, 0.2);
+  transform: none;
+  text-transform: capitalize;
+}
+
+.range-btn:hover:not(:disabled),
+.report-segments button:hover:not(:disabled) {
+  background: #fff;
+  color: var(--green-dark);
+  transform: none;
+}
+
+.range-btn.active,
+.report-segments button.active {
+  background: var(--green);
+  color: var(--paper);
+  border-color: var(--green);
+}
+
+.custom-range {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.custom-range input {
+  width: 100%;
+  min-width: 0;
+}
+
+.report-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.report-metric {
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255,250,240,0.9);
+}
+
+.report-metric span,
+.report-row-values span {
+  font-size: 0.7rem;
+  font-weight: 800;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.report-metric strong {
+  color: var(--green-dark);
+  font-size: 1.05rem;
+  overflow-wrap: anywhere;
+}
+
+.report-status,
+.report-error {
+  margin: 0;
+  border-radius: 12px;
+  padding: 9px 12px;
+  font-size: 0.86rem;
+}
+
+.report-status {
+  color: var(--green-dark);
+  background: rgba(40,92,77,0.08);
+}
+
+.report-error {
+  color: var(--clay);
+  background: rgba(164,95,60,0.08);
+}
+
+.report-list {
+  display: grid;
+  gap: 8px;
+}
+
+.report-row {
+  display: grid;
+  gap: 12px;
+  padding: 13px 14px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255,250,240,0.9);
+}
+
+.report-row-head {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.report-row-head strong {
+  font-size: 0.95rem;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.report-row-head span {
+  font-size: 0.78rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.report-row-values {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.report-row-values div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.report-row-values strong {
+  font-size: 0.95rem;
+  color: var(--green-dark);
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 760px) {
+  .app {
+    height: 100svh;
+  }
+
+  .app-header {
+    padding: 10px 12px;
+    align-items: flex-start;
+  }
+
+  .app-header h1 {
+    font-size: 1.05rem;
+  }
+
+  .header-right {
+    gap: 8px;
+  }
+
+  .conn-status {
+    max-width: 130px;
+  }
+
+  .tab-nav {
+    padding: 0 8px;
+  }
+
+  .tab-btn {
+    padding: 11px 16px;
+  }
+
   .queue-controls {
     width: 100%;
     display: grid;
@@ -1401,5 +1688,59 @@ select, input[type="text"], input[type="number"] {
 
   .option-picker-btn {
     min-height: 120px;
+  }
+
+  .reports-tab {
+    padding: 12px;
+  }
+
+  .reports-toolbar {
+    align-items: stretch;
+  }
+
+  .report-metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .custom-range {
+    grid-template-columns: 1fr;
+  }
+
+  .custom-range button {
+    width: 100%;
+  }
+
+  .report-row-values {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .receipt-panel-head,
+  .receipt-history-row {
+    align-items: stretch;
+  }
+}
+
+@media (max-width: 390px) {
+  button {
+    white-space: normal;
+  }
+
+  .reports-toolbar {
+    display: grid;
+  }
+
+  .report-metric-grid,
+  .report-row-values {
+    grid-template-columns: 1fr;
+  }
+
+  .receipt-panel-head,
+  .receipt-history-row {
+    display: grid;
+  }
+
+  .receipt-panel-head button,
+  .receipt-history-row button {
+    width: 100%;
   }
 }

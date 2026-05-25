@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { DbClient } from "../db.js";
+import { normalizePhone } from "../phone.js";
 import {
   asObject,
   getParams,
@@ -219,7 +220,7 @@ async function resolveCustomerId(db: DbClient, body: Record<string, unknown>): P
   const created = await db.customer.create({
     data: {
       name: requiredString(customer.name, "customer.name"),
-      phone: optionalString(customer.phone, "customer.phone"),
+      phone: normalizePhone(requiredString(customer.phone, "customer.phone")),
       email: optionalString(customer.email, "customer.email"),
     },
   });

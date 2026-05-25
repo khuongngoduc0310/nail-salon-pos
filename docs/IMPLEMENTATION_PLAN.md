@@ -120,7 +120,16 @@ Build:
 - Reprint receipt.
 - SMS/email queue placeholder.
 
-## Phase 10 — Clover Mini integration
+## Phase 10 - Refund recording
+
+Build:
+
+- Record refunds against paid sales.
+- Call terminal refund adapter for card payments with provider references.
+- Reject over-refunds.
+- Include refunds in summary and refund reports.
+
+## Phase 11 — Clover Mini integration
 
 Build after mock payment flows are stable.
 
@@ -132,7 +141,7 @@ Build after mock payment flows are stable.
 - Reconciliation/recovery screen.
 - Refund path.
 
-## Phase 11 — PWAs
+## Phase 12 — PWAs
 
 Build:
 
@@ -140,7 +149,7 @@ Build:
 - Customer booking/check-in PWA.
 - Add manifest and install prompts.
 
-## Phase 12 — Cloud sync
+## Phase 13 — Cloud sync
 
 Build:
 

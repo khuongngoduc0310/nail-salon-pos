@@ -108,6 +108,17 @@ export type Sale = {
   customer?: Customer | null;
 };
 
+export type ReceiptRecord = {
+  id: string;
+  saleId: string;
+  printStatus: string;
+  smsStatus?: string | null;
+  emailStatus?: string | null;
+  receiptDataJson?: unknown;
+  printedAt?: string | null;
+  createdAt?: string | null;
+};
+
 export type WorkSession = {
   id: string;
   businessDate: string;
@@ -138,6 +149,108 @@ export type OpenSessionResponse = CurrentSessionResponse & {
   reopenedFromClosed?: boolean;
 };
 
+export type OwnerSession = {
+  user: { id: string; name: string; role: "owner" };
+  token: string;
+  expiresAt: string;
+};
+
+export type ReportRange = {
+  start: string;
+  end: string;
+};
+
+export type ReportSummary = {
+  grossServiceCents: number;
+  discountCents: number;
+  refundCents: number;
+  netServiceCents: number;
+  tipsCents: number;
+  workerCommissionCents: number;
+  workerTipsCents: number;
+  businessShareCents: number;
+  totalCollectedCents: number;
+  salesCount: number;
+  paymentBreakdown: {
+    cashCents: number;
+    cardCents: number;
+    giftCardCents: number;
+    otherCents: number;
+  };
+};
+
+export type SalesReportRow = {
+  id: string;
+  completedAt: string | null;
+  customer?: Customer | null;
+  subtotalCents: number;
+  discountCents: number;
+  tipCents: number;
+  totalCents: number;
+  collectedCents: number;
+  paymentMethods: string[];
+  itemCount: number;
+};
+
+export type WorkerReportRow = {
+  workerId: string;
+  workerName: string;
+  serviceCount: number;
+  netServiceCents: number;
+  commissionCents: number;
+  tipsCents: number;
+  totalWorkerPayCents: number;
+  businessShareCents: number;
+};
+
+export type TurnReportRow = {
+  workerId: string;
+  workerName: string;
+  turnsTaken: number;
+  completedTurns: number;
+  skippedTurns: number;
+  appointmentTurns: number;
+  walkInTurns: number;
+  averageServiceMinutes: number;
+  lastTurnAt: string | null;
+};
+
+export type PaymentReportRow = {
+  id: string;
+  saleId: string | null;
+  method: "cash" | "card" | "gift_card" | "other";
+  amountCents: number;
+  tipCents: number;
+  status: string;
+  provider?: string | null;
+  providerPaymentId?: string | null;
+  cardBrand?: string | null;
+  cardLast4?: string | null;
+  authCode?: string | null;
+  createdAt: string | null;
+};
+
+export type DiscountReportRow = {
+  id: string;
+  saleId: string;
+  saleItemId: string | null;
+  type: string;
+  amountCents: number;
+  percent?: string | number | null;
+  reason?: string | null;
+  createdAt: string | null;
+};
+
+export type RefundReportRow = {
+  id: string;
+  saleId: string;
+  paymentId: string | null;
+  amountCents: number;
+  reason?: string | null;
+  paymentMethod?: string | null;
+  createdAt: string | null;
+};
+
 export class ApiError extends Error {
   readonly code?: string;
   readonly data?: unknown;
@@ -158,6 +271,45 @@ export async function fetchTurnDashboard(): Promise<{
   workers: TurnDashboardWorker[];
 }> {
   return fetchJson("/turns/dashboard");
+}
+
+export async function loginOwner(input: { emailOrPhone: string; password: string }): Promise<OwnerSession> {
+  return fetchJson("/owner/login", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function fetchReportSummary(token: string, range: ReportRange): Promise<{ range: ReportRange; summary: ReportSummary }> {
+  return fetchAuthedJson(token, "/reports/summary" + reportQuery(range));
+}
+
+export async function fetchSalesReport(token: string, range: ReportRange): Promise<{ range: ReportRange; sales: SalesReportRow[] }> {
+  return fetchAuthedJson(token, "/reports/sales" + reportQuery(range));
+}
+
+export async function fetchWorkersReport(token: string, range: ReportRange): Promise<{ range: ReportRange; workers: WorkerReportRow[] }> {
+  return fetchAuthedJson(token, "/reports/workers" + reportQuery(range));
+}
+
+export async function fetchTurnsReport(token: string, range: ReportRange): Promise<{ range: ReportRange; workers: TurnReportRow[] }> {
+  return fetchAuthedJson(token, "/reports/turns" + reportQuery(range));
+}
+
+export async function fetchPaymentsReport(token: string, range: ReportRange): Promise<{
+  range: ReportRange;
+  payments: PaymentReportRow[];
+  totals: ReportSummary["paymentBreakdown"];
+}> {
+  return fetchAuthedJson(token, "/reports/payments" + reportQuery(range));
+}
+
+export async function fetchDiscountsReport(token: string, range: ReportRange): Promise<{ range: ReportRange; discounts: DiscountReportRow[] }> {
+  return fetchAuthedJson(token, "/reports/discounts" + reportQuery(range));
+}
+
+export async function fetchRefundsReport(token: string, range: ReportRange): Promise<{ range: ReportRange; refunds: RefundReportRow[] }> {
+  return fetchAuthedJson(token, "/reports/refunds" + reportQuery(range));
 }
 
 export async function fetchServiceCategories(): Promise<ServiceCategory[]> {
@@ -332,10 +484,43 @@ export async function completeSale(saleId: string) {
   );
 }
 
+export async function fetchSaleReceipts(saleId: string): Promise<ReceiptRecord[]> {
+  return fetchJson("/sales/" + saleId + "/receipts");
+}
+
+export async function printSaleReceipt(saleId: string) {
+  return fetchJson<{ receipt: ReceiptRecord; printResult: { success: boolean; provider: string; message?: string } }>(
+    "/sales/" + saleId + "/receipts/print",
+    { method: "POST", body: "{}" }
+  );
+}
+
+export async function reprintSaleReceipt(saleId: string, receiptId: string) {
+  return fetchJson<{ receipt: ReceiptRecord; printResult: { success: boolean; provider: string; message?: string } }>(
+    "/sales/" + saleId + "/receipts/" + receiptId + "/reprint",
+    { method: "POST", body: "{}" }
+  );
+}
+
 async function recordPayment(saleId: string, method: "cash" | "gift-card", amountCents: number) {
   return fetchJson<{ payment: Payment; sale: Sale }>("/sales/" + saleId + "/payments/" + method, {
     method: "POST",
     body: JSON.stringify({ amountCents, tipCents: 0 }),
+  });
+}
+
+function reportQuery(range: ReportRange): string {
+  const params = new URLSearchParams({ start: range.start, end: range.end });
+  return "?" + params.toString();
+}
+
+async function fetchAuthedJson<T>(token: string, path: string, init?: RequestInit): Promise<T> {
+  return fetchJson<T>(path, {
+    ...init,
+    headers: {
+      ...(init?.headers ?? {}),
+      Authorization: `Bearer ${token}`,
+    },
   });
 }
 

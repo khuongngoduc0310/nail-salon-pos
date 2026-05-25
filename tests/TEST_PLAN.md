@@ -164,29 +164,29 @@ Create known sales dataset and verify:
 ## Launch checklist
 
 ```text
-[ ] Owner can log in
-[ ] Worker can log in
-[ ] Customer can check in
-[ ] Owner can create/edit services
-[ ] Owner can assign worker
-[ ] Worker status becomes In Service
-[ ] Turn count increases only when service starts
-[ ] Checkout totals are correct
-[ ] Tips go 100% to worker
-[ ] Commission uses worker-specific snapshot
-[ ] Split payment works
-[ ] Mock card approved/declined/cancelled flows work
+[x] Owner can log in
+[x] Worker can log in
+[x] Customer can check in
+[x] Owner can create/edit services
+[x] Owner can assign worker
+[x] Worker status becomes In Service
+[x] Turn count increases only when service starts
+[x] Checkout totals are correct
+[x] Tips go 100% to worker
+[x] Commission uses worker-specific snapshot
+[x] Split payment works
+[x] Mock card approved/declined/cancelled flows work
 [ ] Clover card payment works
 [ ] Clover decline does not mark sale paid
-[ ] Cash payment works
-[ ] Gift card payment works
-[ ] Receipt prints
-[ ] Refund records correctly
-[ ] Discount records correctly
-[ ] Worker report matches manual math
-[ ] Owner sales report matches manual math
+[x] Cash payment works
+[x] Gift card payment works
+[x] Receipt prints
+[x] Refund records correctly
+[x] Discount records correctly
+[x] Worker report matches manual math
+[x] Owner sales report matches manual math
 [ ] Internet-down cash checkout works
 [ ] Sync queue works
-[ ] Worker cannot access owner reports
-[ ] Customer cannot see other customers
+[x] Worker cannot access owner reports
+[x] Customer cannot see other customers
 ```

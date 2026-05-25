@@ -13,6 +13,7 @@ export type DbClient = {
     update(args: unknown): Promise<unknown>;
   };
   user: {
+    findMany(args?: unknown): Promise<unknown[]>;
     create(args: unknown): Promise<unknown>;
   };
   worker: {
@@ -23,7 +24,9 @@ export type DbClient = {
   };
   customer: {
     findMany(args?: unknown): Promise<unknown[]>;
+    findUnique(args: unknown): Promise<unknown | null>;
     create(args: unknown): Promise<unknown>;
+    update(args: unknown): Promise<unknown>;
   };
   appointment: {
     findMany(args?: unknown): Promise<unknown[]>;
@@ -62,9 +65,22 @@ export type DbClient = {
     update(args: unknown): Promise<unknown>;
   };
   payment: {
+    findMany(args?: unknown): Promise<unknown[]>;
+    findUnique(args: unknown): Promise<unknown | null>;
     create(args: unknown): Promise<unknown>;
+    update(args: unknown): Promise<unknown>;
+  };
+  receipt: {
+    findMany(args?: unknown): Promise<unknown[]>;
+    create(args: unknown): Promise<unknown>;
+    update(args: unknown): Promise<unknown>;
   };
   discount: {
+    findMany(args?: unknown): Promise<unknown[]>;
+    create(args: unknown): Promise<unknown>;
+  };
+  refund: {
+    findMany(args?: unknown): Promise<unknown[]>;
     create(args: unknown): Promise<unknown>;
   };
   $transaction<T>(callback: (tx: DbClient) => Promise<T>): Promise<T>;

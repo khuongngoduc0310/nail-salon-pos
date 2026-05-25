@@ -3,6 +3,7 @@ import { randomBytes, scryptSync } from "node:crypto";
 
 const prisma = new PrismaClient();
 const SEEDED_WORKER_PASSWORD = "1234";
+const SEEDED_OWNER_PASSWORD = "1234";
 
 const ids = {
   owner: "00000000-0000-0000-0000-000000000001",
@@ -43,12 +44,13 @@ const ids = {
 };
 
 async function main() {
+  const ownerPasswordHash = hashSecret(SEEDED_OWNER_PASSWORD);
   const owner = await prisma.user.upsert({
     where: { email: "owner@example.com" },
     update: {
       name: "Owner",
       role: "owner",
-      passwordHash: "dev-password-placeholder",
+      passwordHash: ownerPasswordHash,
       pinHash: "dev-pin-placeholder",
       active: true,
     },
@@ -57,7 +59,7 @@ async function main() {
       name: "Owner",
       email: "owner@example.com",
       role: "owner",
-      passwordHash: "dev-password-placeholder",
+      passwordHash: ownerPasswordHash,
       pinHash: "dev-pin-placeholder",
     },
   });

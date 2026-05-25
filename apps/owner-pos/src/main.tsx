@@ -11,16 +11,27 @@ import {
   createWorkerSessionCheckin,
   createEmptySale,
   fetchCurrentSession,
+  fetchDiscountsReport,
+  fetchPaymentsReport,
+  fetchRefundsReport,
+  fetchReportSummary,
+  fetchSalesReport,
   fetchSessionReport,
+  fetchTurnsReport,
+  fetchWorkersReport,
   createSaleForCheckin,
   fetchCheckins,
   fetchSale,
+  fetchSaleReceipts,
   fetchServiceCategories,
   fetchTurnDashboard,
   fetchWorkers,
+  loginOwner,
   openWorkSession,
   recordCashPayment,
   recordGiftCardPayment,
+  printSaleReceipt,
+  reprintSaleReceipt,
   removeSaleItem,
   setTipDistribution,
   startCardPayment,
@@ -30,19 +41,29 @@ import {
   type ActiveTurn,
   type CheckedInWorker,
   type Checkin,
+  type DiscountReportRow,
+  type OwnerSession,
+  type PaymentReportRow,
+  type RefundReportRow,
+  type ReportRange,
+  type ReportSummary,
+  type ReceiptRecord,
   type Sale,
   type SaleItem,
+  type SalesReportRow,
   type SessionCandidate,
   type ServiceCategory,
+  type TurnReportRow,
   type TurnDashboardWorker,
   type WorkSession,
   type Worker,
+  type WorkerReportRow,
   type WorkerStatus,
 } from "./api.js";
 import "./styles.css";
 
 type LoadState = "loading" | "ready" | "error";
-type ActiveTab = "turns" | "checkout";
+type ActiveTab = "turns" | "checkout" | "reports";
 type CheckoutPhase = "build_order" | "payment" | "card_processing" | "tip_review";
 
 type WorkerTipShare = {
@@ -75,6 +96,11 @@ function formatMoney(cents: number): string {
 function formatSessionDate(value?: string | null): string {
   if (!value) return "-";
   return new Date(value).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
+}
+
+function formatDateTime(value?: string | null): string {
+  if (!value) return "-";
+  return new Date(value).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
 function digitsToDisplay(digits: string): string {
@@ -266,6 +292,11 @@ function App() {
               className={"tab-btn" + (activeTab === "checkout" ? " active" : "")}
               onClick={() => setActiveTab("checkout")}
             >Checkout</button>
+            <button
+              type="button"
+              className={"tab-btn" + (activeTab === "reports" ? " active" : "")}
+              onClick={() => setActiveTab("reports")}
+            >Reports</button>
           </nav>
 
           {activeTab === "turns" && (
@@ -297,6 +328,7 @@ function App() {
               onRefresh={(m) => void loadAll(m)}
             />
           )}
+          {activeTab === "reports" && <ReportsTab workers={workers} />}
         </>
       )}
     </main>
@@ -743,6 +775,282 @@ function OptionPickerModal({
   );
 }
 
+type ReportView = "summary" | "sales" | "workers" | "turns" | "payments" | "discounts" | "refunds";
+type ReportQuickRange = "today" | "yesterday" | "seven_days" | "custom";
+
+const OWNER_SESSION_STORAGE_KEY = "owner_pos_session_v1";
+const reportViews: ReportView[] = ["summary", "sales", "workers", "turns", "payments", "discounts", "refunds"];
+
+function ReportsTab({ workers }: { workers: Worker[] }) {
+  const [session, setSession] = useState<OwnerSession | null>(() => loadOwnerSession());
+  const [emailOrPhone, setEmailOrPhone] = useState("owner@example.com");
+  const [password, setPassword] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [authLoading, setAuthLoading] = useState(false);
+  const [view, setView] = useState<ReportView>("summary");
+  const [quickRange, setQuickRange] = useState<ReportQuickRange>("today");
+  const [range, setRange] = useState<ReportRange>(() => rangeForQuick("today"));
+  const [customStart, setCustomStart] = useState(() => toLocalInputValue(new Date(range.start)));
+  const [customEnd, setCustomEnd] = useState(() => toLocalInputValue(new Date(range.end)));
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [summary, setSummary] = useState<ReportSummary | null>(null);
+  const [sales, setSales] = useState<SalesReportRow[]>([]);
+  const [workerRows, setWorkerRows] = useState<WorkerReportRow[]>([]);
+  const [turnRows, setTurnRows] = useState<TurnReportRow[]>([]);
+  const [payments, setPayments] = useState<PaymentReportRow[]>([]);
+  const [discounts, setDiscounts] = useState<DiscountReportRow[]>([]);
+  const [refunds, setRefunds] = useState<RefundReportRow[]>([]);
+
+  useEffect(() => {
+    saveOwnerSession(session);
+  }, [session]);
+
+  useEffect(() => {
+    if (!session) return;
+    void loadReports();
+  }, [session, range.start, range.end, view]);
+
+  async function handleLogin(event: React.FormEvent) {
+    event.preventDefault();
+    setAuthError("");
+    setAuthLoading(true);
+    try {
+      const next = await loginOwner({ emailOrPhone: emailOrPhone.trim(), password });
+      setSession(next);
+      setPassword("");
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : "Owner login failed.");
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  async function loadReports() {
+    if (!session) return;
+    setLoading(true);
+    setError("");
+    try {
+      setSummary((await fetchReportSummary(session.token, range)).summary);
+      if (view === "sales") setSales((await fetchSalesReport(session.token, range)).sales);
+      if (view === "workers") setWorkerRows((await fetchWorkersReport(session.token, range)).workers);
+      if (view === "turns") setTurnRows((await fetchTurnsReport(session.token, range)).workers);
+      if (view === "payments") setPayments((await fetchPaymentsReport(session.token, range)).payments);
+      if (view === "discounts") setDiscounts((await fetchDiscountsReport(session.token, range)).discounts);
+      if (view === "refunds") setRefunds((await fetchRefundsReport(session.token, range)).refunds);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        setSession(null);
+        setAuthError("Owner session expired. Please sign in again.");
+      } else {
+        setError(err instanceof Error ? err.message : "Unable to load reports.");
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function applyQuickRange(next: ReportQuickRange) {
+    setQuickRange(next);
+    if (next === "custom") return;
+    const nextRange = rangeForQuick(next);
+    setRange(nextRange);
+    setCustomStart(toLocalInputValue(new Date(nextRange.start)));
+    setCustomEnd(toLocalInputValue(new Date(nextRange.end)));
+  }
+
+  function applyCustomRange() {
+    if (!customStart || !customEnd) {
+      setError("Start and end are required.");
+      return;
+    }
+    setRange({ start: new Date(customStart).toISOString(), end: new Date(customEnd).toISOString() });
+  }
+
+  if (!session) {
+    return (
+      <section className="reports-tab reports-auth-wrap">
+        <form className="reports-auth" onSubmit={handleLogin}>
+          <h2>Owner reports</h2>
+          <label>Email or phone<input type="text" value={emailOrPhone} onChange={(event) => setEmailOrPhone(event.target.value)} /></label>
+          <label>Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="1234" /></label>
+          {authError && <p className="report-error">{authError}</p>}
+          <button type="submit" disabled={authLoading}>{authLoading ? "Signing in..." : "Sign in"}</button>
+        </form>
+      </section>
+    );
+  }
+
+  return (
+    <section className="reports-tab">
+      <div className="reports-toolbar">
+        <div>
+          <h2>Reports</h2>
+          <p className="reports-range-label">{formatDateTime(range.start)} to {formatDateTime(range.end)}</p>
+        </div>
+        <button type="button" className="secondary small" onClick={() => setSession(null)}>Sign out</button>
+      </div>
+
+      <div className="range-panel">
+        <div className="quick-range">
+          {[
+            ["today", "Today"],
+            ["yesterday", "Yesterday"],
+            ["seven_days", "7 days"],
+            ["custom", "Custom"],
+          ].map(([value, label]) => (
+            <button key={value} type="button" className={"range-btn" + (quickRange === value ? " active" : "")} onClick={() => applyQuickRange(value as ReportQuickRange)}>
+              {label}
+            </button>
+          ))}
+        </div>
+        {quickRange === "custom" && (
+          <div className="custom-range">
+            <label>Start<input type="datetime-local" value={customStart} onChange={(event) => setCustomStart(event.target.value)} /></label>
+            <label>End<input type="datetime-local" value={customEnd} onChange={(event) => setCustomEnd(event.target.value)} /></label>
+            <button type="button" className="secondary" onClick={applyCustomRange}>Apply</button>
+          </div>
+        )}
+      </div>
+
+      {summary && <SummaryCards summary={summary} />}
+
+      <nav className="report-segments">
+        {reportViews.map((item) => (
+          <button key={item} type="button" className={view === item ? "active" : ""} onClick={() => setView(item)}>
+            {item}
+          </button>
+        ))}
+      </nav>
+
+      {loading && <p className="report-status">Loading report...</p>}
+      {error && <p className="report-error">{error}</p>}
+
+      <div className="report-content">
+        {view === "summary" && summary && <SummaryDetail summary={summary} />}
+        {view === "sales" && <SalesReportList rows={sales} />}
+        {view === "workers" && <WorkersReportList rows={workerRows} workers={workers} />}
+        {view === "turns" && <TurnsReportList rows={turnRows} />}
+        {view === "payments" && <PaymentsReportList rows={payments} />}
+        {view === "discounts" && <DiscountsReportList rows={discounts} />}
+        {view === "refunds" && <RefundsReportList rows={refunds} />}
+      </div>
+    </section>
+  );
+}
+
+function SummaryCards({ summary }: { summary: ReportSummary }) {
+  const cards: Array<[string, number]> = [
+    ["Gross service", summary.grossServiceCents],
+    ["Net service", summary.netServiceCents],
+    ["Tips", summary.tipsCents],
+    ["Collected", summary.totalCollectedCents],
+  ];
+  return (
+    <div className="report-metric-grid">
+      {cards.map(([label, value]) => (
+        <article key={label} className="report-metric"><span>{label}</span><strong>{formatMoney(value)}</strong></article>
+      ))}
+    </div>
+  );
+}
+
+function SummaryDetail({ summary }: { summary: ReportSummary }) {
+  return (
+    <div className="report-list">
+      <ReportRow title="Service totals" meta={`${summary.salesCount} paid sales`} values={[["Gross", summary.grossServiceCents], ["Discounts", summary.discountCents], ["Refunds", summary.refundCents], ["Net", summary.netServiceCents]]} />
+      <ReportRow title="Worker payout" values={[["Commission", summary.workerCommissionCents], ["Tips", summary.workerTipsCents], ["Total pay", summary.workerCommissionCents + summary.workerTipsCents], ["Business share", summary.businessShareCents]]} />
+      <ReportRow title="Payment breakdown" values={[["Cash", summary.paymentBreakdown.cashCents], ["Card", summary.paymentBreakdown.cardCents], ["Gift card", summary.paymentBreakdown.giftCardCents], ["Other", summary.paymentBreakdown.otherCents]]} />
+    </div>
+  );
+}
+
+function SalesReportList({ rows }: { rows: SalesReportRow[] }) {
+  if (rows.length === 0) return <EmptyReport />;
+  return <div className="report-list">{rows.map((row) => <ReportRow key={row.id} title={customerName(row.customer)} meta={`${formatDateTime(row.completedAt)} | ${row.paymentMethods.join(", ") || "no payment"}`} values={[["Subtotal", row.subtotalCents], ["Discount", row.discountCents], ["Tip", row.tipCents], ["Collected", row.collectedCents]]} />)}</div>;
+}
+
+function WorkersReportList({ rows, workers }: { rows: WorkerReportRow[]; workers: Worker[] }) {
+  if (rows.length === 0) return <EmptyReport />;
+  const workerNames = new Map(workers.map((worker) => [worker.id, worker.displayName]));
+  return <div className="report-list">{rows.map((row) => <ReportRow key={row.workerId} title={workerNames.get(row.workerId) ?? row.workerName} meta={`${row.serviceCount} services`} values={[["Service", row.netServiceCents], ["Commission", row.commissionCents], ["Tips", row.tipsCents], ["Pay", row.totalWorkerPayCents]]} />)}</div>;
+}
+
+function TurnsReportList({ rows }: { rows: TurnReportRow[] }) {
+  if (rows.length === 0) return <EmptyReport />;
+  return <div className="report-list">{rows.map((row) => <ReportRow key={row.workerId} title={row.workerName} meta={`Last: ${formatDateTime(row.lastTurnAt)}`} values={[["Taken", row.turnsTaken], ["Completed", row.completedTurns], ["Skipped", row.skippedTurns], ["Avg min", row.averageServiceMinutes]]} money={false} />)}</div>;
+}
+
+function PaymentsReportList({ rows }: { rows: PaymentReportRow[] }) {
+  if (rows.length === 0) return <EmptyReport />;
+  return <div className="report-list">{rows.map((row) => <ReportRow key={row.id} title={row.method.replace("_", " ")} meta={`${formatDateTime(row.createdAt)}${row.cardLast4 ? ` | ${row.cardBrand ?? "Card"} ${row.cardLast4}` : ""}`} values={[["Amount", row.amountCents], ["Tip", row.tipCents]]} />)}</div>;
+}
+
+function DiscountsReportList({ rows }: { rows: DiscountReportRow[] }) {
+  if (rows.length === 0) return <EmptyReport />;
+  return <div className="report-list">{rows.map((row) => <ReportRow key={row.id} title={row.reason || "Discount"} meta={`${formatDateTime(row.createdAt)} | sale ${shortId(row.saleId)}`} values={[["Amount", row.amountCents]]} />)}</div>;
+}
+
+function RefundsReportList({ rows }: { rows: RefundReportRow[] }) {
+  if (rows.length === 0) return <EmptyReport />;
+  return <div className="report-list">{rows.map((row) => <ReportRow key={row.id} title={row.reason || "Refund"} meta={`${formatDateTime(row.createdAt)} | ${row.paymentMethod ?? "payment"}`} values={[["Amount", row.amountCents]]} />)}</div>;
+}
+
+function ReportRow({ title, meta, values, money = true }: { title: string; meta?: string; values: Array<[string, number]>; money?: boolean }) {
+  return (
+    <article className="report-row">
+      <div className="report-row-head"><strong>{title}</strong>{meta && <span>{meta}</span>}</div>
+      <div className="report-row-values">
+        {values.map(([label, value]) => <div key={label}><span>{label}</span><strong>{money ? formatMoney(value) : value}</strong></div>)}
+      </div>
+    </article>
+  );
+}
+
+function EmptyReport() {
+  return <p className="empty-hint big">No report records for this range.</p>;
+}
+
+function loadOwnerSession(): OwnerSession | null {
+  try {
+    const raw = localStorage.getItem(OWNER_SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as OwnerSession;
+    if (!parsed.token || new Date(parsed.expiresAt).getTime() <= Date.now()) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function saveOwnerSession(session: OwnerSession | null) {
+  if (!session) localStorage.removeItem(OWNER_SESSION_STORAGE_KEY);
+  else localStorage.setItem(OWNER_SESSION_STORAGE_KEY, JSON.stringify(session));
+}
+
+function rangeForQuick(value: ReportQuickRange): ReportRange {
+  const end = new Date();
+  const start = new Date();
+  if (value === "yesterday") {
+    start.setDate(start.getDate() - 1);
+    end.setDate(end.getDate() - 1);
+  } else if (value === "seven_days") {
+    start.setDate(start.getDate() - 6);
+  }
+  start.setHours(0, 0, 0, 0);
+  end.setHours(23, 59, 59, 999);
+  return { start: start.toISOString(), end: end.toISOString() };
+}
+
+function toLocalInputValue(date: Date): string {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 16);
+}
+
+function shortId(id: string): string {
+  return id.slice(0, 8);
+}
+
 function CheckoutTab({
   workers, activeCheckins, categories, onRefresh,
 }: {
@@ -761,6 +1069,8 @@ function CheckoutTab({
   const [customService, setCustomService] = useState<CustomServiceState>({ open: false });
   const [tipDist, setTipDist] = useState<WorkerTipShare[]>([]);
   const [totalTipFromTerminal, setTotalTipFromTerminal] = useState(0);
+  const [completedSale, setCompletedSale] = useState<{ id: string; customerName: string } | null>(null);
+  const [receipts, setReceipts] = useState<ReceiptRecord[]>([]);
 
   const balanceDueCents = Math.max((currentSale?.totalCents ?? 0) - (currentSale?.amountPaidCents ?? 0), 0);
 
@@ -784,6 +1094,7 @@ function CheckoutTab({
     if (selectedCheckin?.id === checkin.id && currentSale) return;
     await run(async () => {
       const sale = await createSaleForCheckin(checkin);
+      setCompletedSale(null); setReceipts([]);
       setCurrentSale(await fetchSale(sale.id));
       setSelectedCheckin(checkin);
       setPhase("build_order");
@@ -798,6 +1109,7 @@ function CheckoutTab({
     }
     await run(async () => {
       const sale = await createEmptySale();
+      setCompletedSale(null); setReceipts([]);
       setCurrentSale(await fetchSale(sale.id));
       setSelectedCheckin(null);
       setPhase("build_order");
@@ -954,11 +1266,32 @@ function CheckoutTab({
 
   async function handleCompleteSale() {
     if (!currentSale) return;
+    const saleId = currentSale.id;
+    const completedCustomerName = customerName(currentSale.customer ?? currentSale.checkin?.customer ?? selectedCheckin?.customer ?? null);
     await run(async () => {
-      await completeSale(currentSale.id);
+      await completeSale(saleId);
+      setCompletedSale({ id: saleId, customerName: completedCustomerName });
+      setReceipts(await fetchSaleReceipts(saleId));
       onRefresh("Sale completed.");
-      resetCheckout();
     }, "Sale completed.");
+    setCurrentSale(null); setSelectedCheckin(null); setActiveWorker(null);
+    setReassigningItemId(null); setPhase("build_order");
+    setTipDist([]); setTotalTipFromTerminal(0);
+  }
+
+  async function handlePrintReceipt(saleId: string) {
+    await run(async () => {
+      await printSaleReceipt(saleId);
+      setReceipts(await fetchSaleReceipts(saleId));
+    }, "Receipt printed.");
+  }
+
+  async function handleReprintReceipt(receiptId: string) {
+    if (!completedSale) return;
+    await run(async () => {
+      await reprintSaleReceipt(completedSale.id, receiptId);
+      setReceipts(await fetchSaleReceipts(completedSale.id));
+    }, "Receipt reprinted.");
   }
 
   const numpadWorkerName =
@@ -994,12 +1327,43 @@ function CheckoutTab({
         </div>
 
         {!currentSale && (
-          <div className="empty-start-wrap">
-            <p className="empty-hint big">Select a customer above to start an order.</p>
-            <button type="button" className="secondary" onClick={() => void handleStartNoCheckinSale()}>
-              No check-in customer
-            </button>
-          </div>
+          <>
+            {completedSale && (
+              <section className="receipt-panel">
+                <div className="receipt-panel-head">
+                  <div>
+                    <strong>Sale completed</strong>
+                    <span>{completedSale.customerName}</span>
+                  </div>
+                  <button type="button" onClick={() => void handlePrintReceipt(completedSale.id)}>
+                    Print receipt
+                  </button>
+                </div>
+                {statusMsg && <p className="checkout-status">{statusMsg}</p>}
+                {receipts.length > 0 && (
+                  <div className="receipt-history">
+                    {receipts.map((receipt) => (
+                      <div key={receipt.id} className="receipt-history-row">
+                        <div>
+                          <strong>{receipt.printStatus.replace(/_/g, " ")}</strong>
+                          <span>{formatDateTime(receipt.printedAt ?? receipt.createdAt)}</span>
+                        </div>
+                        <button type="button" className="secondary small" onClick={() => void handleReprintReceipt(receipt.id)}>
+                          Reprint
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+            )}
+            <div className="empty-start-wrap">
+              <p className="empty-hint big">Select a customer above to start an order.</p>
+              <button type="button" className="secondary" onClick={() => void handleStartNoCheckinSale()}>
+                No check-in customer
+              </button>
+            </div>
+          </>
         )}
 
         {currentSale && (

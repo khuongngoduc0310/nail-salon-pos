@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { scryptSync } from "node:crypto";
 import { MockTerminalAdapter } from "@nail/payment-terminal";
+import { MockReceiptPrinterAdapter } from "@nail/receipt-printer";
 import { buildServer } from "./server.js";
+import { hashSecret, issueOwnerToken } from "./auth.js";
 import type { DbClient } from "./db.js";
 
 type Call = {
@@ -37,7 +39,7 @@ function createFakeDb() {
   const db: DbClient = {
     serviceCategory: makeModel("serviceCategory"),
     service: makeModel("service"),
-    user: { create: makeModel("user").create },
+    user: { findMany: makeModel("user").findMany, create: makeModel("user").create },
     worker: makeModel("worker"),
     customer: makeModel("customer"),
     appointment: makeModel("appointment"),
@@ -47,8 +49,19 @@ function createFakeDb() {
     turn: makeModel("turn"),
     sale: makeModel("sale"),
     saleItem: makeModel("saleItem"),
-    payment: { create: makeModel("payment").create },
-    discount: { create: makeModel("discount").create },
+    payment: {
+      findMany: makeModel("payment").findMany,
+      findUnique: makeModel("payment").findUnique,
+      create: makeModel("payment").create,
+      update: makeModel("payment").update,
+    },
+    receipt: {
+      findMany: makeModel("receipt").findMany,
+      create: makeModel("receipt").create,
+      update: makeModel("receipt").update,
+    },
+    discount: { findMany: makeModel("discount").findMany, create: makeModel("discount").create },
+    refund: { findMany: makeModel("refund").findMany, create: makeModel("refund").create },
     $transaction: async <T>(callback: (tx: DbClient) => Promise<T>): Promise<T> => callback(db),
   } satisfies DbClient;
 
@@ -82,7 +95,7 @@ function createFakeDbWithWorkers(workers: unknown[], sessions: unknown[] = []) {
   const db: DbClient = {
     serviceCategory: makeModel("serviceCategory"),
     service: makeModel("service"),
-    user: { create: makeModel("user").create },
+    user: { findMany: makeModel("user").findMany, create: makeModel("user").create },
     worker: makeModel("worker", workers),
     customer: makeModel("customer"),
     appointment: makeModel("appointment"),
@@ -92,8 +105,19 @@ function createFakeDbWithWorkers(workers: unknown[], sessions: unknown[] = []) {
     turn: makeModel("turn"),
     sale: makeModel("sale"),
     saleItem: makeModel("saleItem"),
-    payment: { create: makeModel("payment").create },
-    discount: { create: makeModel("discount").create },
+    payment: {
+      findMany: makeModel("payment").findMany,
+      findUnique: makeModel("payment").findUnique,
+      create: makeModel("payment").create,
+      update: makeModel("payment").update,
+    },
+    receipt: {
+      findMany: makeModel("receipt").findMany,
+      create: makeModel("receipt").create,
+      update: makeModel("receipt").update,
+    },
+    discount: { findMany: makeModel("discount").findMany, create: makeModel("discount").create },
+    refund: { findMany: makeModel("refund").findMany, create: makeModel("refund").create },
     $transaction: async <T>(callback: (tx: DbClient) => Promise<T>): Promise<T> => callback(db),
   };
 
@@ -126,11 +150,22 @@ function createCheckoutFakeDb(input?: {
         status: string;
       }>,
       payments: [] as Array<{
+        id?: string;
         method: "cash" | "card" | "gift_card";
         amountCents: number;
         tipCents?: number;
         status: "approved" | "declined" | "cancelled" | "failed";
+        providerPaymentId?: string;
       }>,
+      refunds: [] as Array<{
+        id: string;
+        saleId: string;
+        paymentId?: string;
+        amountCents: number;
+        reason?: string;
+        providerRefundId?: string;
+      }>,
+      receipts: [] as Array<Record<string, unknown>>,
     },
   };
   const nextId = (prefix: string) => `${prefix}-${id++}`;
@@ -153,7 +188,7 @@ function createCheckoutFakeDb(input?: {
         };
       },
     },
-    user: { create: emptyModel("user", calls).create },
+    user: { findMany: emptyModel("user", calls).findMany, create: emptyModel("user", calls).create },
     worker: {
       ...emptyModel("worker", calls),
       findUnique: async (args: unknown) => {
@@ -224,6 +259,13 @@ function createCheckoutFakeDb(input?: {
       },
     },
     payment: {
+      findMany: async (args?: unknown) => {
+        calls.push({ model: "payment", method: "findMany", args });
+        const where = ((args as { where?: Record<string, unknown> } | undefined)?.where ?? {}) as Record<string, unknown>;
+        return state.sale.payments
+          .filter((payment) => (typeof where.status === "string" ? payment.status === where.status : true))
+          .map((payment) => ({ id: nextId("payment"), saleId: state.sale.id, ...payment }));
+      },
       create: async (args: unknown) => {
         calls.push({ model: "payment", method: "create", args });
         const data = (args as {
@@ -235,11 +277,70 @@ function createCheckoutFakeDb(input?: {
           };
         }).data;
         const payment = { id: nextId("payment"), ...data };
-        state.sale.payments.push(data);
+        state.sale.payments.push(payment);
         return payment;
       },
+      findUnique: async (args: unknown) => {
+        calls.push({ model: "payment", method: "findUnique", args });
+        const where = ((args as { where?: Record<string, unknown> }).where ?? {}) as Record<string, unknown>;
+        return state.sale.payments.find((payment) => payment.id === where.id) ?? null;
+      },
+      update: async (args: unknown) => {
+        calls.push({ model: "payment", method: "update", args });
+        const where = ((args as { where?: Record<string, unknown> }).where ?? {}) as Record<string, unknown>;
+        const data = ((args as { data?: Record<string, unknown> }).data ?? {}) as Record<string, unknown>;
+        const index = state.sale.payments.findIndex((payment) => payment.id === where.id);
+        if (index >= 0) state.sale.payments[index] = { ...state.sale.payments[index], ...data };
+        return index >= 0 ? state.sale.payments[index] : { id: where.id, ...data };
+      },
     },
-    discount: { create: emptyModel("discount", calls).create },
+    receipt: {
+      findMany: async (args?: unknown) => {
+        calls.push({ model: "receipt", method: "findMany", args });
+        const where = ((args as { where?: Record<string, unknown> } | undefined)?.where ?? {}) as Record<string, unknown>;
+        return state.sale.receipts.filter((receipt) => {
+          if (typeof where.id === "string" && receipt.id !== where.id) return false;
+          if (typeof where.saleId === "string" && receipt.saleId !== where.saleId) return false;
+          return true;
+        });
+      },
+      create: async (args: unknown) => {
+        calls.push({ model: "receipt", method: "create", args });
+        const data = ((args as { data?: Record<string, unknown> }).data ?? {}) as Record<string, unknown>;
+        const receipt = { id: nextId("receipt"), createdAt: new Date().toISOString(), ...data };
+        state.sale.receipts.unshift(receipt);
+        return receipt;
+      },
+      update: async (args: unknown) => {
+        calls.push({ model: "receipt", method: "update", args });
+        const where = ((args as { where?: Record<string, unknown> }).where ?? {}) as Record<string, unknown>;
+        const data = ((args as { data?: Record<string, unknown> }).data ?? {}) as Record<string, unknown>;
+        const index = state.sale.receipts.findIndex((receipt) => receipt.id === where.id);
+        if (index >= 0) state.sale.receipts[index] = { ...state.sale.receipts[index], ...data };
+        return index >= 0 ? state.sale.receipts[index] : { id: where.id, ...data };
+      },
+    },
+    discount: { findMany: emptyModel("discount", calls).findMany, create: emptyModel("discount", calls).create },
+    refund: {
+      findMany: async (args?: unknown) => {
+        calls.push({ model: "refund", method: "findMany", args });
+        return state.sale.refunds.map((refund) => ({ ...refund }));
+      },
+      create: async (args: unknown) => {
+        calls.push({ model: "refund", method: "create", args });
+        const data = ((args as { data?: Record<string, unknown> }).data ?? {}) as Record<string, unknown>;
+        const refund = {
+          id: nextId("refund"),
+          saleId: String(data.saleId),
+          paymentId: typeof data.paymentId === "string" ? data.paymentId : undefined,
+          amountCents: Number(data.amountCents),
+          reason: typeof data.reason === "string" ? data.reason : undefined,
+          providerRefundId: typeof data.providerRefundId === "string" ? data.providerRefundId : undefined,
+        };
+        state.sale.refunds.push(refund);
+        return refund;
+      },
+    },
     $transaction: async <T>(callback: (tx: DbClient) => Promise<T>): Promise<T> => callback(db),
   };
 
@@ -317,7 +418,7 @@ function createSessionStateDb(input?: {
   const db: DbClient = {
     serviceCategory: emptyModel("serviceCategory", calls),
     service: emptyModel("service", calls),
-    user: { create: emptyModel("user", calls).create },
+    user: { findMany: emptyModel("user", calls).findMany, create: emptyModel("user", calls).create },
     worker: emptyModel("worker", calls),
     customer: {
       ...emptyModel("customer", calls),
@@ -458,8 +559,19 @@ function createSessionStateDb(input?: {
       update: emptyModel("sale", calls).update,
     },
     saleItem: emptyModel("saleItem", calls),
-    payment: { create: emptyModel("payment", calls).create },
-    discount: { create: emptyModel("discount", calls).create },
+    payment: {
+      findMany: emptyModel("payment", calls).findMany,
+      findUnique: emptyModel("payment", calls).findUnique,
+      create: emptyModel("payment", calls).create,
+      update: emptyModel("payment", calls).update,
+    },
+    receipt: {
+      findMany: emptyModel("receipt", calls).findMany,
+      create: emptyModel("receipt", calls).create,
+      update: emptyModel("receipt", calls).update,
+    },
+    discount: { findMany: emptyModel("discount", calls).findMany, create: emptyModel("discount", calls).create },
+    refund: { findMany: emptyModel("refund", calls).findMany, create: emptyModel("refund", calls).create },
     $transaction: async <T>(callback: (tx: DbClient) => Promise<T>): Promise<T> => callback(db),
   } satisfies DbClient;
 
@@ -565,6 +677,111 @@ describe("local API CRUD routes", () => {
     const app = await buildServer({ db, logger: false });
     const response = await app.inject({ method: "GET", url: "/api/worker/me/dashboard" });
     expect(response.statusCode).toBe(401);
+  });
+
+  it("authenticates an owner with password", async () => {
+    const { db } = createFakeDb();
+    db.user.findMany = async () => [
+      { id: "owner-1", name: "Owner", role: "owner", active: true, passwordHash: hashSecret("1234") },
+    ];
+    const app = await buildServer({ db, logger: false });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/owner/login",
+      payload: { emailOrPhone: "owner@example.com", password: "1234" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ user: { id: "owner-1", role: "owner" } });
+    expect(typeof (response.json() as { token?: unknown }).token).toBe("string");
+  });
+
+  it("rejects owner reports without an owner token", async () => {
+    const { db } = createFakeDb();
+    const app = await buildServer({ db, logger: false });
+
+    const missing = await app.inject({ method: "GET", url: "/api/reports/summary" });
+    const invalid = await app.inject({
+      method: "GET",
+      url: "/api/reports/summary",
+      headers: { authorization: "Bearer not-an-owner-token" },
+    });
+
+    expect(missing.statusCode).toBe(401);
+    expect(invalid.statusCode).toBe(401);
+  });
+
+  it("returns owner summary totals for paid sales", async () => {
+    const completedAt = new Date("2026-05-14T15:00:00.000Z");
+    const { db } = createSessionStateDb({
+      sales: [
+        {
+          id: "sale-1",
+          status: "paid",
+          completedAt,
+          items: [
+            {
+              id: "item-1",
+              workerId: "worker-1",
+              priceCents: 5000,
+              discountCents: 500,
+              finalServiceCents: 4500,
+              workerCommissionCents: 2700,
+              tipCents: 1000,
+              workerTotalCents: 3700,
+              businessCents: 1800,
+              status: "active",
+            },
+          ],
+          payments: [{ id: "payment-1", method: "cash", amountCents: 5500, status: "approved" }],
+          refunds: [],
+        },
+      ],
+    });
+    const app = await buildServer({ db, logger: false });
+    const token = issueOwnerToken("owner-1").token;
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/reports/summary?start=2026-05-14T00:00:00.000Z&end=2026-05-15T00:00:00.000Z",
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      summary: {
+        grossServiceCents: 5000,
+        discountCents: 500,
+        netServiceCents: 4500,
+        tipsCents: 1000,
+        workerCommissionCents: 2700,
+        totalCollectedCents: 5500,
+        paymentBreakdown: { cashCents: 5500, cardCents: 0, giftCardCents: 0, otherCents: 0 },
+      },
+    });
+  });
+
+  it("excludes declined payments from owner payment reports", async () => {
+    const { db, state } = createCheckoutFakeDb();
+    state.sale.payments.push(
+      { method: "cash", amountCents: 4000, status: "approved" },
+      { method: "card", amountCents: 6000, status: "declined" }
+    );
+    const app = await buildServer({ db, logger: false });
+    const token = issueOwnerToken("owner-1").token;
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/reports/payments?start=2026-05-14T00:00:00.000Z&end=2026-05-15T00:00:00.000Z",
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      totals: { cashCents: 4000, cardCents: 0, giftCardCents: 0, otherCents: 0 },
+    });
+    expect(response.json().payments).toHaveLength(1);
   });
 
   it("opens a session and rejects opening a second one with OPEN_SESSION_EXISTS", async () => {
@@ -703,7 +920,7 @@ describe("local API CRUD routes", () => {
     const noSession = await app.inject({
       method: "POST",
       url: "/api/checkins",
-      payload: { requestedWorkerId: "worker-1", customer: { name: "Mary" } },
+      payload: { requestedWorkerId: "worker-1", customer: { name: "Mary", phone: "5551234567" } },
     });
     expect(noSession.statusCode).toBe(409);
 
@@ -712,14 +929,14 @@ describe("local API CRUD routes", () => {
     const firstCheckin = await app.inject({
       method: "POST",
       url: "/api/checkins",
-      payload: { requestedWorkerId: "worker-1", customer: { name: "Mary" } },
+      payload: { requestedWorkerId: "worker-1", customer: { name: "Mary", phone: "5551234567" } },
     });
     expect(firstCheckin.statusCode).toBe(201);
 
     const second = await app.inject({
       method: "POST",
       url: "/api/checkins",
-      payload: { requestedWorkerId: "worker-1", customer: { name: "Jane" } },
+      payload: { requestedWorkerId: "worker-1", customer: { name: "Jane", phone: "5559876543" } },
     });
     expect(second.statusCode).toBe(201);
   });
@@ -1550,6 +1767,26 @@ describe("local API CRUD routes", () => {
     expect(state.sale.amountPaidCents).toBe(0);
   });
 
+  it("records a refund against a paid sale and marks fully refunded sales", async () => {
+    const { db, state } = createCheckoutFakeDb();
+    state.sale.status = "paid";
+    state.sale.totalCents = 12000;
+    state.sale.amountPaidCents = 12000;
+    state.sale.payments.push({ id: "payment-1", method: "cash", amountCents: 12000, status: "approved" });
+    const app = await buildServer({ db, logger: false });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/sales/sale-1/refunds",
+      payload: { paymentId: "payment-1", amountCents: 12000, reason: "Customer refund" },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(state.sale.refunds).toHaveLength(1);
+    expect(state.sale.refunds[0]).toMatchObject({ amountCents: 12000, reason: "Customer refund" });
+    expect(state.sale.status).toBe("refunded");
+  });
+
   it("rejects underpaid sale completion", async () => {
     const { db, state } = createCheckoutFakeDb();
     state.sale.items.push({ id: "item-1", priceCents: 12000, discountCents: 0, tipCents: 0, status: "active" });
@@ -1609,6 +1846,70 @@ describe("local API CRUD routes", () => {
     expect(
       turnCreates.every((call) => (call.args as { data: { sessionId?: string } }).data.sessionId === "session-1")
     ).toBe(true);
+  });
+
+  it("prints and stores a receipt for a paid sale", async () => {
+    const { db, state } = createCheckoutFakeDb();
+    const printer = new MockReceiptPrinterAdapter();
+    state.sale.status = "paid";
+    state.sale.totalCents = 5500;
+    state.sale.amountPaidCents = 5500;
+    state.sale.items.push({ id: "item-1", workerId: "worker-1", priceCents: 5000, discountCents: 0, tipCents: 500, status: "active" });
+    state.sale.payments.push({ id: "payment-1", method: "cash", amountCents: 5500, tipCents: 0, status: "approved" });
+    const app = await buildServer({ db, logger: false, printer });
+
+    const response = await app.inject({ method: "POST", url: "/api/sales/sale-1/receipts/print" });
+
+    expect(response.statusCode).toBe(201);
+    expect(printer.printedReceipts).toHaveLength(1);
+    expect(printer.printedReceipts[0]).toMatchObject({
+      salonName: "Nail Salon",
+      receiptNumber: expect.stringMatching(/^R-/),
+      totalCents: 5500,
+      paymentSummary: "cash $55.00",
+    });
+    expect(state.sale.receipts).toHaveLength(1);
+    expect(state.sale.receipts[0]).toMatchObject({ saleId: "sale-1", printStatus: "printed" });
+  });
+
+  it("rejects receipt printing for an unpaid sale", async () => {
+    const { db } = createCheckoutFakeDb();
+    const app = await buildServer({ db, logger: false });
+
+    const response = await app.inject({ method: "POST", url: "/api/sales/sale-1/receipts/print" });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toEqual({ error: "receipt can only be printed for a paid sale" });
+  });
+
+  it("reprints an existing receipt snapshot", async () => {
+    const { db, state } = createCheckoutFakeDb();
+    const printer = new MockReceiptPrinterAdapter();
+    state.sale.receipts.push({
+      id: "receipt-1",
+      saleId: "sale-1",
+      printStatus: "printed",
+      receiptDataJson: {
+        salonName: "Nail Salon",
+        receiptNumber: "R-TEST",
+        issuedAt: "2026-05-14T15:00:00.000Z",
+        customerName: "Mary",
+        items: [{ serviceName: "Classic Pedicure", workerName: "Amy", amountCents: 5000, tipCents: 1000 }],
+        subtotalCents: 5000,
+        discountCents: 0,
+        tipCents: 1000,
+        totalCents: 6000,
+        paymentSummary: "cash $60.00",
+        payments: [{ method: "cash", amountCents: 6000, tipCents: 0, reference: null }],
+      },
+    });
+    const app = await buildServer({ db, logger: false, printer });
+
+    const response = await app.inject({ method: "POST", url: "/api/sales/sale-1/receipts/receipt-1/reprint" });
+
+    expect(response.statusCode).toBe(200);
+    expect(printer.printedReceipts).toHaveLength(1);
+    expect(printer.printedReceipts[0]).toMatchObject({ receiptNumber: "R-TEST", totalCents: 6000 });
   });
 
   it("rejects tip distribution when there is no approved Clover tip", async () => {

@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import type { DbClient } from "../db.js";
 import { countTurnsTaken, type TurnStatus } from "@nail/shared";
+import { normalizePhone } from "../phone.js";
 import {
   asObject,
   HttpError,
@@ -435,7 +436,7 @@ export async function registerPeopleRoutes(app: FastifyInstance, db: DbClient) {
       const customer = await db.customer.create({
         data: {
           name: requiredString(body.name, "name"),
-          phone: optionalString(body.phone, "phone"),
+          phone: normalizePhone(requiredString(body.phone, "phone")),
           email: optionalString(body.email, "email"),
         },
       });

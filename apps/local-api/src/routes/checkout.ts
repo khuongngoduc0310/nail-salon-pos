@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PaymentTerminalAdapter, TerminalPaymentStatus } from "@nail/payment-terminal";
+import type { ReceiptDocument, ReceiptPrinterAdapter } from "@nail/receipt-printer";
 import {
   calculateSaleItem,
   summarizeSale,
@@ -37,11 +38,16 @@ type SaleRecord = {
   checkinId?: string | null;
   sessionId?: string | null;
   customerId?: string | null;
+  receiptNumber?: string | null;
   status?: string;
   totalCents: number;
-  checkin?: { sessionId?: string | null } | null;
+  completedAt?: Date | string | null;
+  createdAt?: Date | string | null;
+  customer?: { name?: string | null; phone?: string | null } | null;
+  checkin?: { sessionId?: string | null; customer?: { name?: string | null; phone?: string | null } | null } | null;
   items?: SaleItemRecord[];
   payments?: PaymentRecord[];
+  refunds?: RefundRecord[];
 };
 
 type SaleItemRecord = {
@@ -52,17 +58,47 @@ type SaleItemRecord = {
   priceCents: number;
   discountCents: number;
   tipCents: number;
+  finalServiceCents?: number;
   commissionRateSnapshot?: number | string | { toString(): string };
+  worker?: { displayName?: string | null } | null;
 };
 
 type PaymentRecord = {
+  id?: string;
   method: PaymentMethod;
   amountCents: number;
   tipCents?: number;
   status: PaymentStatus;
+  providerPaymentId?: string | null;
+  authCode?: string | null;
+  cardBrand?: string | null;
+  cardLast4?: string | null;
 };
 
-export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient, terminal: PaymentTerminalAdapter) {
+type RefundRecord = {
+  id?: string;
+  saleId?: string;
+  paymentId?: string | null;
+  amountCents: number;
+};
+
+type ReceiptRecord = {
+  id: string;
+  saleId: string;
+  printStatus: string;
+  smsStatus?: string | null;
+  emailStatus?: string | null;
+  receiptDataJson: unknown;
+  printedAt?: Date | string | null;
+  createdAt?: Date | string | null;
+};
+
+export async function registerCheckoutRoutes(
+  app: FastifyInstance,
+  db: DbClient,
+  terminal: PaymentTerminalAdapter,
+  printer: ReceiptPrinterAdapter
+) {
   app.get("/api/sales/:id", async (request, reply) => {
     try {
       const params = getParams(request);
@@ -304,6 +340,73 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
     }
   });
 
+  app.post("/api/sales/:id/refunds", async (request, reply) => {
+    try {
+      const body = asObject(request.body);
+      const params = getParams(request);
+      const saleId = requiredString(params.id, "id");
+      const paymentId = optionalString(body.paymentId, "paymentId");
+      const amountCents = requiredInteger(body.amountCents, "amountCents");
+      const reason = optionalString(body.reason, "reason");
+      const approvedByUserId = optionalString(body.approvedByUserId, "approvedByUserId");
+
+      const sale = requireRecord<SaleRecord>(await db.sale.findUnique(saleLookup(saleId)), "sale not found");
+      if (sale.status !== "paid" && sale.status !== "refunded") {
+        return reply.code(409).send({ error: "only paid sales can be refunded" });
+      }
+
+      const approvedPayments = (sale.payments ?? []).filter((payment) => payment.status === "approved" || payment.status === "refunded");
+      const refundableCents = approvedPayments.reduce((sum, payment) => sum + payment.amountCents, 0);
+      const alreadyRefundedCents = (sale.refunds ?? []).reduce((sum, refund) => sum + refund.amountCents, 0);
+      if (amountCents <= 0 || alreadyRefundedCents + amountCents > refundableCents) {
+        return reply.code(400).send({
+          error: "refund amount exceeds refundable total",
+          refundableCents: Math.max(0, refundableCents - alreadyRefundedCents),
+        });
+      }
+
+      const payment = paymentId
+        ? approvedPayments.find((candidate) => candidate.id === paymentId)
+        : approvedPayments.find((candidate) => candidate.method === "card" && candidate.providerPaymentId) ?? approvedPayments[0];
+      if (!payment) {
+        return reply.code(400).send({ error: "no approved payment is available to refund" });
+      }
+
+      const terminalRefund =
+        payment.method === "card" && payment.providerPaymentId
+          ? await terminal.refund({ providerPaymentId: payment.providerPaymentId, amountCents, reason })
+          : null;
+      if (terminalRefund && terminalRefund.status !== "approved") {
+        return reply.code(409).send({ error: "terminal refund was not approved", terminalRefund });
+      }
+
+      const result = await db.$transaction(async (tx) => {
+        const refund = await tx.refund.create({
+          data: {
+            saleId,
+            paymentId: payment.id,
+            amountCents,
+            reason,
+            approvedByUserId,
+            providerRefundId: terminalRefund?.providerRefundId,
+          },
+        });
+        const totalRefundedCents = alreadyRefundedCents + amountCents;
+        const saleStatus = totalRefundedCents >= refundableCents ? "refunded" : sale.status;
+        const updatedSale = await tx.sale.update({
+          where: { id: saleId },
+          data: { status: saleStatus },
+        });
+
+        return { refund, sale: updatedSale, terminalRefund };
+      });
+
+      return reply.code(201).send(result);
+    } catch (error) {
+      return handleRouteError(error, reply);
+    }
+  });
+
   // Batch-set tip per sale item after the customer enters a tip on the Clover Mini.
   // Body: { items: [{ itemId: string, tipCents: number }] }
   // The POS auto-calculates the split by service value %; the owner can adjust before confirming.
@@ -359,7 +462,6 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
           });
         }
 
-        console.log(`[DEBUG tip-distribution] saleId: ${saleId}, cardTipApprovedCents: ${cardTipApprovedCents}, submittedTipCents: ${submittedTipCents}`);
         if (submittedTipCents !== cardTipApprovedCents) {
           throw new HttpError(400, "tip distribution must equal approved Clover tip total");
         }
@@ -425,6 +527,83 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
       return handleRouteError(error, reply);
     }
   });
+
+  app.get("/api/sales/:id/receipts", async (request, reply) => {
+    try {
+      const params = getParams(request);
+      const saleId = requiredString(params.id, "id");
+      return await db.receipt.findMany({
+        where: { saleId },
+        orderBy: [{ createdAt: "desc" }],
+      });
+    } catch (error) {
+      return handleRouteError(error, reply);
+    }
+  });
+
+  app.post("/api/sales/:id/receipts/print", async (request, reply) => {
+    try {
+      const params = getParams(request);
+      const saleId = requiredString(params.id, "id");
+      const sale = requireRecord<SaleRecord>(await db.sale.findUnique(saleLookup(saleId)), "sale not found");
+      if (sale.status !== "paid") {
+        return reply.code(409).send({ error: "receipt can only be printed for a paid sale" });
+      }
+
+      const receiptNumber = sale.receiptNumber ?? buildReceiptNumber(sale);
+      const receiptDocument = buildReceiptDocument(sale, receiptNumber);
+      const printResult = await printer.printReceipt(receiptDocument);
+      const receipt = await db.$transaction(async (tx) => {
+        if (!sale.receiptNumber) {
+          await tx.sale.update({ where: { id: saleId }, data: { receiptNumber } });
+        }
+        return tx.receipt.create({
+          data: {
+            saleId,
+            printStatus: printResult.success ? "printed" : "failed",
+            smsStatus: "not_sent",
+            emailStatus: "not_sent",
+            receiptDataJson: serializeReceiptDocument(receiptDocument),
+            printedAt: printResult.success ? new Date() : null,
+          },
+        });
+      });
+
+      return reply.code(201).send({ receipt, printResult });
+    } catch (error) {
+      return handleRouteError(error, reply);
+    }
+  });
+
+  app.post("/api/sales/:id/receipts/:receiptId/reprint", async (request, reply) => {
+    try {
+      const params = getParams(request);
+      const saleId = requiredString(params.id, "id");
+      const receiptId = requiredString(params.receiptId, "receiptId");
+      const receipts = (await db.receipt.findMany({
+        where: { id: receiptId, saleId },
+        take: 1,
+      })) as ReceiptRecord[];
+      const existing = receipts[0];
+      if (!existing) {
+        return reply.code(404).send({ error: "receipt not found" });
+      }
+
+      const receiptDocument = hydrateReceiptDocument(existing.receiptDataJson);
+      const printResult = await printer.printReceipt(receiptDocument);
+      const receipt = await db.receipt.update({
+        where: { id: receiptId },
+        data: {
+          printStatus: printResult.success ? "printed" : "failed",
+          printedAt: printResult.success ? new Date() : existing.printedAt ?? null,
+        },
+      });
+
+      return { receipt, printResult };
+    } catch (error) {
+      return handleRouteError(error, reply);
+    }
+  });
 }
 
 async function recordApprovedPayment(
@@ -486,8 +665,101 @@ function saleLookup(saleId: string) {
       appointment: { include: { customer: true, worker: true } },
       items: { where: { status: "active" }, include: { worker: true, service: true } },
       payments: true,
+      refunds: true,
     },
   };
+}
+
+function buildReceiptDocument(sale: SaleRecord, receiptNumber: string): ReceiptDocument {
+  const approvedPayments = (sale.payments ?? []).filter((payment) => payment.status === "approved");
+  return {
+    salonName: "Nail Salon",
+    salonAddress: "Store address",
+    salonPhone: "Store phone",
+    receiptNumber,
+    issuedAt: sale.completedAt ? new Date(sale.completedAt) : new Date(),
+    customerName: sale.customer?.name ?? sale.checkin?.customer?.name ?? sale.customer?.phone ?? sale.checkin?.customer?.phone ?? null,
+    items: (sale.items ?? []).map((item) => ({
+      serviceName: item.serviceNameSnapshot ?? "Service",
+      workerName: item.worker?.displayName ?? "Worker",
+      amountCents: item.finalServiceCents ?? Math.max(0, item.priceCents - item.discountCents),
+      tipCents: item.tipCents,
+    })),
+    subtotalCents: (sale.items ?? []).reduce((sum, item) => sum + item.priceCents, 0),
+    discountCents: (sale.items ?? []).reduce((sum, item) => sum + item.discountCents, 0),
+    tipCents: (sale.items ?? []).reduce((sum, item) => sum + item.tipCents, 0),
+    totalCents: sale.totalCents,
+    paymentSummary: buildPaymentSummary(approvedPayments),
+    payments: approvedPayments.map((payment) => ({
+      method: payment.method,
+      amountCents: payment.amountCents,
+      tipCents: payment.tipCents ?? 0,
+      reference: payment.authCode ?? payment.providerPaymentId ?? payment.cardLast4 ?? null,
+    })),
+  };
+}
+
+function buildPaymentSummary(payments: PaymentRecord[]): string {
+  if (payments.length === 0) return "No approved payments";
+  return payments
+    .map((payment) => `${payment.method.replace("_", " ")} ${formatCents(payment.amountCents)}`)
+    .join(", ");
+}
+
+function buildReceiptNumber(sale: SaleRecord): string {
+  const issuedAt = sale.completedAt ?? sale.createdAt ?? new Date();
+  const stamp = new Date(issuedAt).toISOString().slice(0, 10).replace(/-/g, "");
+  return `R-${stamp}-${sale.id.slice(0, 8)}`;
+}
+
+function serializeReceiptDocument(receipt: ReceiptDocument) {
+  return {
+    ...receipt,
+    issuedAt: receipt.issuedAt.toISOString(),
+  };
+}
+
+function hydrateReceiptDocument(value: unknown): ReceiptDocument {
+  const data = asObject(value, "receiptDataJson");
+  return {
+    salonName: requiredString(data.salonName, "salonName"),
+    salonAddress: optionalString(data.salonAddress, "salonAddress"),
+    salonPhone: optionalString(data.salonPhone, "salonPhone"),
+    receiptNumber: requiredString(data.receiptNumber, "receiptNumber"),
+    issuedAt: new Date(requiredString(data.issuedAt, "issuedAt")),
+    customerName: optionalString(data.customerName, "customerName") ?? null,
+    items: Array.isArray(data.items)
+      ? data.items.map((item) => {
+          const raw = asObject(item, "receipt item");
+          return {
+            serviceName: requiredString(raw.serviceName, "serviceName"),
+            workerName: requiredString(raw.workerName, "workerName"),
+            amountCents: requiredInteger(raw.amountCents, "amountCents"),
+            tipCents: requiredInteger(raw.tipCents, "tipCents"),
+          };
+        })
+      : [],
+    subtotalCents: requiredInteger(data.subtotalCents, "subtotalCents"),
+    discountCents: requiredInteger(data.discountCents, "discountCents"),
+    tipCents: requiredInteger(data.tipCents, "tipCents"),
+    totalCents: requiredInteger(data.totalCents, "totalCents"),
+    paymentSummary: requiredString(data.paymentSummary, "paymentSummary"),
+    payments: Array.isArray(data.payments)
+      ? data.payments.map((payment) => {
+          const raw = asObject(payment, "receipt payment");
+          return {
+            method: requiredString(raw.method, "method"),
+            amountCents: requiredInteger(raw.amountCents, "amountCents"),
+            tipCents: requiredInteger(raw.tipCents, "tipCents"),
+            reference: optionalString(raw.reference, "reference") ?? null,
+          };
+        })
+      : [],
+  };
+}
+
+function formatCents(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
 }
 
 function toSaleItems(items: SaleItemRecord[]): SaleItemInput[] {
