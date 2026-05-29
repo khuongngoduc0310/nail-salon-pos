@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { DbClient } from "../db.js";
+import { broadcast } from "../ws/events.js";
 import {
   asObject,
   getParams,
@@ -134,6 +135,7 @@ export async function registerSchedulingRoutes(app: FastifyInstance, db: DbClien
         });
       });
 
+      broadcast("checkin:created", { checkin });
       return reply.code(201).send(checkin);
     } catch (error) {
       return handleRouteError(error, reply);

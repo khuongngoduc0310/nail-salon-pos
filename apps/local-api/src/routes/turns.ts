@@ -1,13 +1,15 @@
 import type { FastifyInstance } from "fastify";
 import {
-  countTurnsTaken,
+  countEffectiveTurns,
+  calculateTurnCount,
   rankSuggestedWorkers,
   type TurnStatus,
   type WorkerRankingInput,
   type WorkerStatus,
 } from "@nail/shared";
 import type { DbClient } from "../db.js";
-import { asObject, getParams, handleRouteError, optionalString, requiredString } from "../http.js";
+import { HttpError, asObject, getParams, getQuery, handleRouteError, optionalString, requiredString } from "../http.js";
+import { broadcast } from "../ws/events.js";
 
 type WorkerRecord = {
   id: string;
@@ -20,12 +22,14 @@ type WorkerRecord = {
 type TurnRecord = {
   id: string;
   status: TurnStatus;
+  turnCount?: number;
   startedAt: Date | string | null;
   endedAt?: Date | string | null;
   completedAt?: Date | string | null;
   customer?: unknown;
   checkinId?: string | null;
   appointmentId?: string | null;
+  saleId?: string | null;
 };
 
 type SaleItemRecord = {
@@ -34,9 +38,17 @@ type SaleItemRecord = {
 };
 
 export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
-  app.get("/api/turns/dashboard", async (_request, reply) => {
+  app.get("/api/turns/dashboard", async (request, reply) => {
     try {
-      const workers = await loadDashboardWorkers(db);
+      const query = getQuery(request);
+      const currentSessionOnly = optionalString(query.currentSessionOnly, "currentSessionOnly") === "true";
+      const currentSession = currentSessionOnly ? await getCurrentSession(db) : null;
+
+      if (currentSessionOnly && !currentSession) {
+        return { workers: [] };
+      }
+
+      const workers = await loadDashboardWorkers(db, currentSession?.id);
       const suggestions = rankSuggestedWorkers(workers.map(toRankingInput));
       const rankByWorker = new Map(suggestions.map((worker) => [worker.workerId, worker.suggestionRank]));
 
@@ -45,12 +57,19 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
           workerId: worker.id,
           name: worker.displayName,
           status: worker.currentStatus,
-          turnsTakenToday: countTurnsTaken(worker.turns ?? []),
+          turnsTakenToday: countEffectiveTurns(worker.turns ?? []),
           lastTurnEndedAt: getLastTurnEndedAt(worker.turns ?? []),
           activeTurn: getActiveTurn(worker.turns ?? []),
           salesTodayCents: getSalesTodayCents(worker.saleItems ?? []),
           tipsTodayCents: getTipsTodayCents(worker.saleItems ?? []),
           suggestionRank: rankByWorker.get(worker.id) ?? null,
+          turns: (worker.turns ?? []).map((t: any) => ({
+            turnId: t.id,
+            status: t.status,
+            turnCount: t.turnCount ?? 1,
+            customerName: t.customer?.name || "—",
+            services: getTurnServices(t),
+          })),
         })),
       };
     } catch (error) {
@@ -71,10 +90,26 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
     try {
       const body = asObject(request.body);
       const result = await db.$transaction(async (tx) => {
+        const workerId = requiredString(body.workerId, "workerId");
+        const session = await getCurrentSession(tx);
+        if (!session) {
+          throw new HttpError(400, "No open session");
+        }
+
+        const worker: any = await tx.worker.findUnique({ where: { id: workerId } });
+        if (!worker || worker.currentStatus === "in_service" || worker.currentStatus === "on_break") {
+          throw new Error("Worker is not available for assignment");
+        }
+
+        // Determine turnCount based on service price vs salon threshold
+        const turnCount = await resolveTurnCount(db, body);
+
         const turn = await tx.turn.create({
           data: {
             checkinId: requiredString(body.checkinId, "checkinId"),
-            workerId: requiredString(body.workerId, "workerId"),
+            workerId,
+            sessionId: session.id,
+            turnCount,
             turnType: optionalString(body.turnType, "turnType") ?? "manual",
             suggestedWorkerId: optionalString(body.suggestedWorkerId, "suggestedWorkerId"),
             ownerOverrideReason: optionalString(body.ownerOverrideReason, "ownerOverrideReason"),
@@ -90,6 +125,7 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
         return { turn, checkin };
       });
 
+      broadcast("turn:assigned", { result });
       return reply.code(201).send(result);
     } catch (error) {
       return handleRouteError(error, reply);
@@ -121,6 +157,7 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
         return { turn, worker, checkin };
       });
 
+      broadcast("turn:started", { result });
       return result;
     } catch (error) {
       return handleRouteError(error, reply);
@@ -152,6 +189,7 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
         return { turn, worker, checkin };
       });
 
+      broadcast("turn:completed", { result });
       return result;
     } catch (error) {
       return handleRouteError(error, reply);
@@ -182,25 +220,87 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
         return { turn, worker };
       });
 
+      broadcast("turn:skipped", { result });
       return result;
+    } catch (error) {
+      return handleRouteError(error, reply);
+    }
+  });
+
+  app.patch("/api/turns/:id", async (request, reply) => {
+    try {
+      const params = getParams(request);
+      const body = asObject(request.body);
+      const turnId = requiredString(params.id, "id");
+      const turnCount = body.turnCount != null ? Number(body.turnCount) : undefined;
+      const turn = await (db as any).turn.update({
+        where: { id: turnId },
+        data: turnCount != null ? { turnCount } : {},
+      });
+      broadcast("turn:count_updated", { turnId, turnCount });
+      return turn;
     } catch (error) {
       return handleRouteError(error, reply);
     }
   });
 }
 
-async function loadDashboardWorkers(db: DbClient): Promise<WorkerRecord[]> {
+/**
+ * Resolves the turnCount for a new turn assignment.
+ *
+ * Reads the salon's threshold from settings and the service's turnCount override,
+ * then uses calculateTurnCount from shared logic.
+ *
+ * If no serviceId is provided, defaults to 1 (normal turn).
+ */
+async function resolveTurnCount(db: DbClient, body: Record<string, unknown>): Promise<number> {
+  try {
+    const settings: any = await (db as any).salonSettings.findUnique({
+      where: { id: "default" },
+    });
+    const threshold = settings?.turnCountThresholdCents ?? 3000;
+
+    const serviceId = optionalString(body.serviceId, "serviceId");
+    if (serviceId) {
+      const service: any = await (db as any).service.findUnique({
+        where: { id: serviceId },
+        select: { priceCents: true, turnCount: true },
+      });
+      if (service) {
+        return calculateTurnCount(service.priceCents, threshold, service.turnCount);
+      }
+    }
+
+    // No service provided — default to a normal turn (1)
+    return 1;
+  } catch {
+    // If settings lookup fails, default to normal turn
+    return 1;
+  }
+}
+
+async function loadDashboardWorkers(db: DbClient, sessionId?: string): Promise<WorkerRecord[]> {
   const start = startOfToday();
   const end = endOfToday(start);
-  const workers = await db.worker.findMany({
-    where: { active: true },
+  const workers = await (db as any).worker.findMany({
+    where: {
+      active: true,
+      ...(sessionId ? { workerSessions: { some: { sessionId } } } : {}),
+    },
     include: {
       turns: {
-        where: { createdAt: { gte: start, lt: end } },
-        include: { customer: true },
+        where: sessionId ? { sessionId } : { createdAt: { gte: start, lt: end } },
+        include: {
+          customer: true,
+          checkin: { include: { customer: true } },
+          sale: { include: { items: { where: { status: "active" }, include: { service: true } } } },
+        },
+        orderBy: { createdAt: "asc" },
       },
       saleItems: {
-        where: { createdAt: { gte: start, lt: end }, status: "active" },
+        where: sessionId
+          ? { sale: { sessionId }, status: "active" }
+          : { createdAt: { gte: start, lt: end }, status: "active" },
       },
     },
     orderBy: [{ sortOrder: "asc" }, { displayName: "asc" }],
@@ -209,12 +309,37 @@ async function loadDashboardWorkers(db: DbClient): Promise<WorkerRecord[]> {
   return workers as WorkerRecord[];
 }
 
+async function getCurrentSession(db: DbClient): Promise<{ id: string } | null> {
+  try {
+    const session = await (db as any).session.findFirst({
+      where: { status: "open" },
+      orderBy: { openedAt: "desc" },
+    });
+    return session && typeof session.id === "string" ? { id: session.id } : null;
+  } catch {
+    return null;
+  }
+}
+
+function getTurnServices(turn: any): { serviceName: string; categoryName: string; turnCount: number; priceCents: number }[] {
+  const items = turn.sale?.items || [];
+  if (items.length === 0) {
+    return [{ serviceName: "—", categoryName: "—", turnCount: turn.turnCount ?? 1, priceCents: 0 }];
+  }
+  return items.map((si: any) => ({
+    serviceName: si.service?.name || si.serviceNameSnapshot || "—",
+    categoryName: si.service?.category?.name || si.categoryNameSnapshot || "—",
+    turnCount: si.service?.turnCount ?? turn.turnCount ?? 1,
+    priceCents: si.priceCents,
+  }));
+}
+
 function toRankingInput(worker: WorkerRecord): WorkerRankingInput {
   return {
     workerId: worker.id,
     name: worker.displayName,
     status: worker.currentStatus,
-    turnsTakenToday: countTurnsTaken(worker.turns ?? []),
+    turnsTakenToday: countEffectiveTurns(worker.turns ?? []),
     lastTurnEndedAt: getLastTurnEndedAt(worker.turns ?? []),
     salesTodayCents: getSalesTodayCents(worker.saleItems ?? []),
     activeTurn: getActiveTurn(worker.turns ?? []),

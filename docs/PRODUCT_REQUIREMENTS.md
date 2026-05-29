@@ -19,7 +19,8 @@ The system must support:
 
 Owner can:
 
-- Log in with secure credentials/PIN.
+- Use the owner POS floor, assignment, and checkout flows without repeated PIN entry.
+- Enter owner PIN only for secure areas/actions such as service management, worker management, reports, end-of-day close, refunds, and protected settings.
 - Manage services and service categories.
 - Manage workers and commission rates.
 - View all worker turns.

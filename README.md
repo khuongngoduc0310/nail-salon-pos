@@ -108,6 +108,15 @@ Default local URLs:
 - Customer PWA: `http://localhost:5175`
 - Local API health: `http://localhost:4000/api/health`
 
+Owner POS opens directly to the floor view. Secure areas and actions use the seeded dev owner PIN: `1234`.
+
+Owner POS dev-server troubleshooting:
+
+- Start only the owner POS with `corepack pnpm dev:owner`.
+- Verify `http://localhost:5173` returns `200`.
+- If the browser logs `client:1035 WebSocket connection ... failed`, the owner dev server is not running or port `5173` is blocked.
+- The API WebSocket is separate and uses `ws://localhost:4000/ws`.
+
 ## Business context
 
 The system is for a single-store nail salon. It needs a local POS that works in the store even when the internet is down, while still supporting online appointments and remote worker/customer access through cloud sync.

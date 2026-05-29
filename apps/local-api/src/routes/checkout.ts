@@ -9,6 +9,7 @@ import {
   type SaleItemInput,
 } from "@nail/shared";
 import type { DbClient } from "../db.js";
+import { broadcast } from "../ws/events.js";
 import {
   asObject,
   getParams,
@@ -60,11 +61,25 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
   app.post("/api/sales", async (request, reply) => {
     try {
       const body = asObject(request.body);
+
+      // Auto-attach current open session
+      let sessionId: string | undefined;
+      try {
+        const openSession = await (db as any).session.findFirst({
+          where: { status: "open" },
+          orderBy: { openedAt: "desc" },
+        });
+        sessionId = openSession?.id;
+      } catch {
+        // session table might not exist yet — that's ok
+      }
+
       const sale = await db.sale.create({
         data: {
           customerId: optionalString(body.customerId, "customerId"),
           appointmentId: optionalString(body.appointmentId, "appointmentId"),
           checkinId: optionalString(body.checkinId, "checkinId"),
+          sessionId,
           status: "open",
           subtotalCents: 0,
           discountTotalCents: 0,
@@ -130,6 +145,31 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
       });
 
       return reply.code(201).send(result);
+    } catch (error) {
+      return handleRouteError(error, reply);
+    }
+  });
+
+  app.delete("/api/sales/:id/items/:itemId", async (request, reply) => {
+    try {
+      const params = getParams(request);
+      const saleId = requiredString(params.id, "id");
+      const itemId = requiredString(params.itemId, "itemId");
+
+      const result = await db.$transaction(async (tx) => {
+        const item = requireRecord<SaleItemRecord>(
+          await tx.saleItem.update({
+            where: { id: itemId },
+            data: { status: "cancelled" },
+          }),
+          "sale item not found"
+        );
+        const sale = await recomputeSale(tx, saleId);
+
+        return { saleItem: item, sale };
+      });
+
+      return result;
     } catch (error) {
       return handleRouteError(error, reply);
     }
@@ -276,9 +316,26 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
           ? await tx.checkin.update({ where: { id: sale.checkinId }, data: { status: "paid" } })
           : null;
 
+        // Stamp turnCount on associated Turn from service turn counts
+        const saleItems = await (tx as any).saleItem.findMany({
+          where: { saleId, status: "active", serviceId: { not: null } },
+          include: { service: true },
+        });
+        const totalTurnCount = (saleItems as any[]).reduce(
+          (sum: number, si: any) => sum + (si.service?.turnCount ?? 1),
+          0,
+        );
+        if (sale.checkinId && totalTurnCount > 0) {
+          await (tx as any).turn.updateMany({
+            where: { checkinId: sale.checkinId, status: "completed" },
+            data: { turnCount: totalTurnCount },
+          });
+        }
+
         return { sale: completedSale, checkin, changeDueCents: summary.changeDueCents };
       });
 
+      broadcast("checkout:completed", { result });
       return result;
     } catch (error) {
       return handleRouteError(error, reply);

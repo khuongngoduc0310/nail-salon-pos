@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@fastify/cors": "^10.0.2",
+    "@fastify/websocket": "^11.2.0",
     "@nail/db": "workspace:*",
     "@nail/payment-terminal": "workspace:*",
     "@nail/receipt-printer": "workspace:*",

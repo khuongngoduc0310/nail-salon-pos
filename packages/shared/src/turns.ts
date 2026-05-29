@@ -4,6 +4,7 @@ export type WorkerStatus = "available" | "in_service" | "on_break" | "off_today"
 export type TurnForCounting = {
   status: TurnStatus;
   startedAt: Date | string | null;
+  turnCount?: number;
 };
 
 export type TurnDashboardWorker = {
@@ -38,38 +39,108 @@ export type TurnLifecycleActionResult = {
   checkin?: unknown;
 };
 
+// ─── Tunable constants ──────────────────────────────────────────────
+
+/** Default turnCount for a normal service (counts as a rotation slot). */
+export const DEFAULT_TURN_COUNT = 1;
+
+/** Turn count for free/minor services (worker keeps position in rotation). */
+export const ZERO_TURN_COUNT = 0;
+
+// ─── Turn counting helpers ──────────────────────────────────────────
+
+/**
+ * A turn counts if it's in one of the active states (assigned, in_service, completed).
+ * Skipped and cancelled turns are excluded.
+ * This ensures newly assigned turns are immediately reflected on dashboards.
+ */
 export function turnCountsAsTaken(turn: TurnForCounting): boolean {
-  return turn.startedAt !== null;
+  const activeStatuses: TurnStatus[] = ["assigned", "in_service", "completed"];
+  return activeStatuses.includes(turn.status);
 }
 
+/**
+ * Counts the raw number of active turns (each turn = 1, ignoring turnCount).
+ * Includes assigned, in_service, and completed turns.
+ */
 export function countTurnsTaken(turns: TurnForCounting[]): number {
   return turns.filter(turnCountsAsTaken).length;
 }
 
+/**
+ * Sums the turnCount values across all active turns.
+ * Kept for backwards compatibility — may be used by reports etc.
+ */
+export function sumTurnCounts(turns: TurnForCounting[]): number {
+  return turns
+    .filter(turnCountsAsTaken)
+    .reduce((sum, t) => sum + (t.turnCount ?? DEFAULT_TURN_COUNT), 0);
+}
+
+/**
+ * Counts only "effective" turns — active turns where turnCount > 0.
+ * A turn with turnCount = 0 (free/minor service) does NOT increment the count.
+ * Includes assigned, in_service, and completed turns.
+ * This is the number shown on the dashboard as "turnsTakenToday".
+ */
+export function countEffectiveTurns(turns: TurnForCounting[]): number {
+  return turns
+    .filter(turnCountsAsTaken)
+    .filter((t) => (t.turnCount ?? DEFAULT_TURN_COUNT) > 0)
+    .length;
+}
+
+/**
+ * Determines the turnCount for a turn based on service price and salon threshold.
+ *
+ * @param priceCents - The price of the service in cents
+ * @param thresholdCents - The salon's turn count threshold (services below this price get turnCount = 0)
+ * @param serviceTurnCount - Optional explicit override from the Service model (owner-set)
+ * @returns 0 if price is below threshold and no explicit override, otherwise serviceTurnCount ?? 1
+ */
+export function calculateTurnCount(
+  priceCents: number,
+  thresholdCents: number,
+  serviceTurnCount?: number | null,
+): number {
+  // If the service has an explicit turnCount override set by the owner, use it
+  if (serviceTurnCount != null) {
+    return serviceTurnCount;
+  }
+
+  // Default behaviour: services priced below the threshold are "free" turns (0)
+  // Services at or above the threshold count as 1 turn
+  return priceCents < thresholdCents ? ZERO_TURN_COUNT : DEFAULT_TURN_COUNT;
+}
+
+// ─── Worker ranking (round-robin) ───────────────────────────────────
+
+/**
+ * Ranks available workers in round-robin order.
+ *
+ * Round-robin logic: the worker whose last turn ended the longest ago
+ * (or who hasn't had a turn yet today) is ranked first.
+ *
+ * Secondary sort: by name (alphabetical) for stable ordering.
+ */
 export function rankSuggestedWorkers(workers: WorkerRankingInput[]): SuggestedWorker[] {
   return [...workers]
-    .filter((worker) => worker.status !== "off_today" && worker.status !== "on_break" && worker.status !== "in_service")
+    .filter(
+      (worker) =>
+        worker.status !== "off_today" &&
+        worker.status !== "on_break" &&
+        worker.status !== "in_service",
+    )
     .sort((left, right) => {
-      const statusDifference = statusRank(left.status) - statusRank(right.status);
-      if (statusDifference !== 0) {
-        return statusDifference;
+      // Primary: round-robin — who hasn't had a turn the longest?
+      // null = never had a turn today → treated as "oldest" → goes first
+      const leftTime = timestampOrNever(left.lastTurnEndedAt);
+      const rightTime = timestampOrNever(right.lastTurnEndedAt);
+      if (leftTime !== rightTime) {
+        return leftTime - rightTime;
       }
 
-      const turnDifference = left.turnsTakenToday - right.turnsTakenToday;
-      if (turnDifference !== 0) {
-        return turnDifference;
-      }
-
-      const lastTurnDifference = timestampOrOldest(left.lastTurnEndedAt) - timestampOrOldest(right.lastTurnEndedAt);
-      if (lastTurnDifference !== 0) {
-        return lastTurnDifference;
-      }
-
-      const salesDifference = left.salesTodayCents - right.salesTodayCents;
-      if (salesDifference !== 0) {
-        return salesDifference;
-      }
-
+      // Secondary: alphabetical by name for stable ordering
       return left.name.localeCompare(right.name);
     })
     .map((worker, index) => ({
@@ -78,14 +149,15 @@ export function rankSuggestedWorkers(workers: WorkerRankingInput[]): SuggestedWo
     }));
 }
 
-function statusRank(status: WorkerStatus): number {
-  return status === "available" ? 0 : 1;
-}
+// ─── Internal helpers ────────────────────────────────────────────────
 
-function timestampOrOldest(value: Date | string | null): number {
+/**
+ * Converts a Date/string/null to a numeric timestamp.
+ * null (never had a turn today) returns -1 → highest priority → sorts first in round-robin.
+ */
+function timestampOrNever(value: Date | string | null): number {
   if (!value) {
-    return Number.NEGATIVE_INFINITY;
+    return -1; // never had a turn → highest priority (sorts before any real timestamp)
   }
-
   return new Date(value).getTime();
 }

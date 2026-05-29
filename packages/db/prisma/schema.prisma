@@ -105,6 +105,11 @@ enum GiftCardTxType {
   adjustment
 }
 
+enum SessionStatus {
+  open
+  closed
+}
+
 model User {
   id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   name         String
@@ -140,6 +145,7 @@ model Worker {
   turns          Turn[]       @relation("TurnWorker")
   suggestedTurns Turn[]       @relation("SuggestedWorker")
   saleItems      SaleItem[]
+  workerSessions WorkerSession[]
 
   @@map("workers")
 }
@@ -180,6 +186,7 @@ model Service {
   description     String?
   priceCents      Int      @map("price_cents")
   durationMinutes Int      @default(30) @map("duration_minutes")
+  turnCount       Int      @default(1) @map("turn_count")
   active          Boolean  @default(true)
   sortOrder       Int      @default(0) @map("sort_order")
   createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz
@@ -257,6 +264,7 @@ model Turn {
   saleId              String?    @map("sale_id") @db.Uuid
   turnType            TurnType   @default(manual) @map("turn_type")
   status              TurnStatus @default(assigned)
+  turnCount           Int        @default(1) @map("turn_count")
   assignedByUserId    String?    @map("assigned_by_user_id") @db.Uuid
   suggestedWorkerId   String?    @map("suggested_worker_id") @db.Uuid
   ownerOverrideReason String?    @map("owner_override_reason")
@@ -274,9 +282,12 @@ model Turn {
   appointment     Appointment? @relation(fields: [appointmentId], references: [id])
   sale            Sale?        @relation(fields: [saleId], references: [id])
   suggestedWorker Worker?      @relation("SuggestedWorker", fields: [suggestedWorkerId], references: [id])
+  session         Session?     @relation(fields: [sessionId], references: [id])
+  sessionId       String?      @map("session_id") @db.Uuid
 
   @@index([workerId, status])
   @@index([startedAt])
+  @@index([sessionId])
   @@map("turns")
 }
 
@@ -307,8 +318,11 @@ model Sale {
   refunds     Refund[]
   discounts   Discount[]
   receipts    Receipt[]
+  session     Session?   @relation(fields: [sessionId], references: [id])
+  sessionId   String?    @map("session_id") @db.Uuid
 
   @@index([completedAt])
+  @@index([sessionId])
   @@map("sales")
 }
 
@@ -423,6 +437,40 @@ model GiftCardTransaction {
   @@map("gift_card_transactions")
 }
 
+model Session {
+  id                String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  openedAt          DateTime      @default(now()) @map("opened_at") @db.Timestamptz
+  closedAt          DateTime?     @map("closed_at") @db.Timestamptz
+  openingCashCents  Int           @default(0) @map("opening_cash_cents")
+  closingCashCents  Int?          @map("closing_cash_cents")
+  status            SessionStatus @default(open)
+  openedByUserId    String?       @map("opened_by_user_id") @db.Uuid
+  closedByUserId    String?       @map("closed_by_user_id") @db.Uuid
+  createdAt         DateTime      @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt         DateTime      @default(now()) @map("updated_at") @db.Timestamptz
+
+  sales          Sale[]
+  turns          Turn[]
+  workerSessions WorkerSession[]
+
+  @@index([status])
+  @@map("sessions")
+}
+
+model WorkerSession {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workerId    String    @map("worker_id") @db.Uuid
+  sessionId   String    @map("session_id") @db.Uuid
+  checkedInAt DateTime  @default(now()) @map("checked_in_at") @db.Timestamptz
+
+  worker  Worker  @relation(fields: [workerId], references: [id])
+  session Session @relation(fields: [sessionId], references: [id])
+
+  @@unique([workerId, sessionId])
+  @@index([sessionId])
+  @@map("worker_sessions")
+}
+
 model Receipt {
   id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   saleId          String   @map("sale_id") @db.Uuid
@@ -451,6 +499,14 @@ model SyncEvent {
   updatedAt  DateTime @default(now()) @map("updated_at") @db.Timestamptz
 
   @@map("sync_events")
+}
+
+model SalonSettings {
+  id                      String   @id @default("default") @db.VarChar(32)
+  turnCountThresholdCents Int      @default(3000) @map("turn_count_threshold_cents")
+  updatedAt               DateTime @default(now()) @map("updated_at") @db.Timestamptz
+
+  @@map("salon_settings")
 }
 
 model AuditLog {

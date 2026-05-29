@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { DbClient } from "../db.js";
+import { broadcast } from "../ws/events.js";
 import {
   asObject,
   getParams,
@@ -88,10 +89,12 @@ export async function registerPeopleRoutes(app: FastifyInstance, db: DbClient) {
         return reply.code(400).send({ error: "status is not a valid worker status" });
       }
 
-      return await db.worker.update({
+      const worker = await db.worker.update({
         where: { id: requiredString(params.id, "id") },
         data: { currentStatus: status },
       });
+      broadcast("worker:status_changed", { workerId: requiredString(params.id, "id"), status });
+      return worker;
     } catch (error) {
       return handleRouteError(error, reply);
     }

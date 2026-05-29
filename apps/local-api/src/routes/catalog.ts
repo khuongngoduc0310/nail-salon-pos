@@ -86,12 +86,23 @@ export async function registerCatalogRoutes(app: FastifyInstance, db: DbClient) 
   app.post("/api/services", async (request, reply) => {
     try {
       const body = asObject(request.body);
+      const priceCents = requiredInteger(body.priceCents, "priceCents");
+      let turnCount = optionalInteger(body.turnCount, "turnCount");
+
+      if (turnCount == null) {
+        // Auto-compute default: 1 if price >= threshold, else 0
+        const settings = await (db as any).salonSettings.findUnique({ where: { id: "default" } });
+        const threshold = settings?.turnCountThresholdCents ?? 3000;
+        turnCount = priceCents >= threshold ? 1 : 0;
+      }
+
       const service = await db.service.create({
         data: {
           categoryId: requiredString(body.categoryId, "categoryId"),
           name: requiredString(body.name, "name"),
           description: optionalString(body.description, "description"),
-          priceCents: requiredInteger(body.priceCents, "priceCents"),
+          priceCents,
+          turnCount,
           durationMinutes: optionalInteger(body.durationMinutes, "durationMinutes") ?? 30,
           active: optionalBoolean(body.active, "active") ?? true,
           sortOrder: optionalInteger(body.sortOrder, "sortOrder") ?? 0,
@@ -113,6 +124,7 @@ export async function registerCatalogRoutes(app: FastifyInstance, db: DbClient) 
         name: optionalString(body.name, "name"),
         description: optionalString(body.description, "description"),
         priceCents: optionalInteger(body.priceCents, "priceCents"),
+        turnCount: optionalInteger(body.turnCount, "turnCount"),
         durationMinutes: optionalInteger(body.durationMinutes, "durationMinutes"),
         active: optionalBoolean(body.active, "active"),
         sortOrder: optionalInteger(body.sortOrder, "sortOrder"),

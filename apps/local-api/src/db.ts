@@ -13,6 +13,8 @@ export type DbClient = {
     update(args: unknown): Promise<unknown>;
   };
   user: {
+    findFirst(args?: unknown): Promise<unknown | null>;
+    findUnique(args: unknown): Promise<unknown | null>;
     create(args: unknown): Promise<unknown>;
   };
   worker: {
@@ -41,19 +43,27 @@ export type DbClient = {
     update(args: unknown): Promise<unknown>;
   };
   sale: {
+    findMany(args?: unknown): Promise<unknown[]>;
     findUnique(args: unknown): Promise<unknown | null>;
     create(args: unknown): Promise<unknown>;
     update(args: unknown): Promise<unknown>;
   };
   saleItem: {
+    findMany(args?: unknown): Promise<unknown[]>;
     findUnique(args: unknown): Promise<unknown | null>;
     create(args: unknown): Promise<unknown>;
     update(args: unknown): Promise<unknown>;
   };
   payment: {
+    findMany(args?: unknown): Promise<unknown[]>;
     create(args: unknown): Promise<unknown>;
   };
   discount: {
+    findMany(args?: unknown): Promise<unknown[]>;
+    create(args: unknown): Promise<unknown>;
+  };
+  refund: {
+    findMany(args?: unknown): Promise<unknown[]>;
     create(args: unknown): Promise<unknown>;
   };
   $transaction<T>(callback: (tx: DbClient) => Promise<T>): Promise<T>;

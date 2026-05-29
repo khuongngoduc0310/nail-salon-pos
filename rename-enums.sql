@@ -1,0 +1,14 @@
+ALTER TYPE user_role RENAME TO "UserRole";
+ALTER TYPE worker_status RENAME TO "WorkerStatus";
+ALTER TYPE checkin_status RENAME TO "CheckinStatus";
+ALTER TYPE appointment_status RENAME TO "AppointmentStatus";
+ALTER TYPE turn_status RENAME TO "TurnStatus";
+ALTER TYPE turn_type RENAME TO "TurnType";
+ALTER TYPE sale_status RENAME TO "SaleStatus";
+ALTER TYPE sale_item_status RENAME TO "SaleItemStatus";
+ALTER TYPE payment_method RENAME TO "PaymentMethod";
+ALTER TYPE payment_status RENAME TO "PaymentStatus";
+ALTER TYPE discount_type RENAME TO "DiscountType";
+ALTER TYPE gift_card_status RENAME TO "GiftCardStatus";
+ALTER TYPE gift_card_tx_type RENAME TO "GiftCardTxType";
+ALTER TYPE session_status RENAME TO "SessionStatus";
