@@ -109,6 +109,46 @@ Response includes:
 }
 ```
 
+## Sessions
+
+### POST /sessions/current/worker-checkin
+
+Clock a worker into the current open salon session. If the worker already has a session row and previously clocked out, this reopens that row by clearing `checkedOutAt`.
+
+Request:
+
+```json
+{ "workerId": "uuid" }
+```
+
+Response:
+
+```json
+{
+  "id": "uuid",
+  "workerId": "uuid",
+  "name": "Amy",
+  "checkedInAt": "2026-05-12T09:15:00.000Z",
+  "checkedOutAt": null
+}
+```
+
+### POST /sessions/current/worker-clockout
+
+Clock a worker out of the current open salon session. Fails if the worker has an active assigned or in-service turn in the current session.
+
+Request:
+
+```json
+{ "workerId": "uuid" }
+```
+
+Response uses the same worker-session shape as worker check-in, with `checkedOutAt` populated.
+
+### GET /sessions/current/workers
+
+Returns current-session worker clock records, including both actively clocked-in and clocked-out workers.
+
 ## Customers and check-in
 
 ### POST /customers

@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { DbClient } from "../db.js";
 import { sumTurnCounts } from "@nail/shared";
+import { verifyWorkerToken } from "./auth.js";
 import { getParams, handleRouteError, requiredString } from "../http.js";
 
 export async function registerWorkerDashboardRoutes(app: FastifyInstance, db: DbClient) {
@@ -9,6 +10,12 @@ export async function registerWorkerDashboardRoutes(app: FastifyInstance, db: Db
       const params = getParams(request);
       const workerId = requiredString(params.id, "id");
 
+      // Auth: require a valid worker/owner token
+      const userId = await verifyWorkerToken(db, request.headers.authorization);
+      if (!userId) {
+        return reply.code(401).send({ error: "Not authenticated" });
+      }
+
       const worker = await (db as any).worker.findUnique({
         where: { id: workerId },
         include: { user: true },
@@ -16,6 +23,11 @@ export async function registerWorkerDashboardRoutes(app: FastifyInstance, db: Db
 
       if (!worker) {
         return reply.code(404).send({ error: "Worker not found" });
+      }
+
+      // Ensure the token user matches the requested worker
+      if (worker.userId !== userId && worker.user?.role !== "owner") {
+        return reply.code(403).send({ error: "Forbidden" });
       }
 
       const today = new Date();

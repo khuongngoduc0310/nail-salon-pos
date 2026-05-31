@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { DbClient } from "../db.js";
 import { broadcast } from "../ws/events.js";
+import { verifyWorkerToken } from "./auth.js";
 import {
   asObject,
   getParams,
@@ -89,12 +90,34 @@ export async function registerPeopleRoutes(app: FastifyInstance, db: DbClient) {
         return reply.code(400).send({ error: "status is not a valid worker status" });
       }
 
-      const worker = await db.worker.update({
-        where: { id: requiredString(params.id, "id") },
+      const workerId = requiredString(params.id, "id");
+
+      // Auth: require a valid worker/owner token
+      const userId = await verifyWorkerToken(db, request.headers.authorization);
+      if (!userId) {
+        return reply.code(401).send({ error: "Not authenticated" });
+      }
+
+      // Verify the token user owns this worker record
+      const worker = await (db as any).worker.findUnique({
+        where: { id: workerId },
+        include: { user: true },
+      });
+
+      if (!worker) {
+        return reply.code(404).send({ error: "Worker not found" });
+      }
+
+      if (worker.userId !== userId && worker.user?.role !== "owner") {
+        return reply.code(403).send({ error: "Forbidden" });
+      }
+
+      const updated = await db.worker.update({
+        where: { id: workerId },
         data: { currentStatus: status },
       });
-      broadcast("worker:status_changed", { workerId: requiredString(params.id, "id"), status });
-      return worker;
+      broadcast("worker:status_changed", { workerId, status });
+      return updated;
     } catch (error) {
       return handleRouteError(error, reply);
     }

@@ -49,7 +49,10 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
       }
 
       const workers = await loadDashboardWorkers(db, currentSession?.id);
-      const suggestions = rankSuggestedWorkers(workers.map(toRankingInput));
+      const suggestionCandidates = currentSessionOnly
+        ? workers.filter((worker) => worker.checkedIn)
+        : workers;
+      const suggestions = rankSuggestedWorkers(suggestionCandidates.map(toRankingInput));
       const rankByWorker = new Map(suggestions.map((worker) => [worker.workerId, worker.suggestionRank]));
 
       return {
@@ -63,6 +66,7 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
           salesTodayCents: getSalesTodayCents(worker.saleItems ?? []),
           tipsTodayCents: getTipsTodayCents(worker.saleItems ?? []),
           suggestionRank: rankByWorker.get(worker.id) ?? null,
+          checkedIn: worker.checkedIn,
           turns: (worker.turns ?? []).map((t: any) => ({
             turnId: t.id,
             status: t.status,
@@ -99,6 +103,13 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
         const worker: any = await tx.worker.findUnique({ where: { id: workerId } });
         if (!worker || worker.currentStatus === "in_service" || worker.currentStatus === "on_break") {
           throw new Error("Worker is not available for assignment");
+        }
+
+        const workerSession = await (tx as any).workerSession.findFirst({
+          where: { workerId, sessionId: session.id, checkedOutAt: null },
+        });
+        if (!workerSession) {
+          throw new Error("Worker must be clocked in before assignment");
         }
 
         // Determine turnCount based on service price vs salon threshold
@@ -279,13 +290,12 @@ async function resolveTurnCount(db: DbClient, body: Record<string, unknown>): Pr
   }
 }
 
-async function loadDashboardWorkers(db: DbClient, sessionId?: string): Promise<WorkerRecord[]> {
+async function loadDashboardWorkers(db: DbClient, sessionId?: string): Promise<(WorkerRecord & { checkedIn: boolean })[]> {
   const start = startOfToday();
   const end = endOfToday(start);
   const workers = await (db as any).worker.findMany({
     where: {
       active: true,
-      ...(sessionId ? { workerSessions: { some: { sessionId } } } : {}),
     },
     include: {
       turns: {
@@ -302,11 +312,19 @@ async function loadDashboardWorkers(db: DbClient, sessionId?: string): Promise<W
           ? { sale: { sessionId }, status: "active" }
           : { createdAt: { gte: start, lt: end }, status: "active" },
       },
+      workerSessions: sessionId
+        ? { where: { sessionId } }
+        : true,
     },
     orderBy: [{ sortOrder: "asc" }, { displayName: "asc" }],
   });
 
-  return workers as WorkerRecord[];
+  return workers.map((w: any) => ({
+    ...w,
+    checkedIn: sessionId
+      ? (w.workerSessions ?? []).some((session: any) => !session.checkedOutAt)
+      : false,
+  })) as (WorkerRecord & { checkedIn: boolean })[];
 }
 
 async function getCurrentSession(db: DbClient): Promise<{ id: string } | null> {

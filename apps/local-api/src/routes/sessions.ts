@@ -9,6 +9,16 @@ import {
   requiredString,
 } from "../http.js";
 
+function serializeWorkerSession(ws: any) {
+  return {
+    id: ws.id,
+    workerId: ws.workerId,
+    name: ws.worker?.displayName || ws.worker?.user?.name || "Worker",
+    checkedInAt: ws.checkedInAt,
+    checkedOutAt: ws.checkedOutAt ?? null,
+  };
+}
+
 export async function registerSessionRoutes(app: FastifyInstance, db: DbClient) {
   // Get current open session
   app.get("/api/sessions/current", async (_request, reply) => {
@@ -111,16 +121,65 @@ export async function registerSessionRoutes(app: FastifyInstance, db: DbClient) 
         return reply.code(400).send({ error: "No open session" });
       }
 
-      // Upsert: if already exists for this session, return it; otherwise create
+      // Upsert: if already exists for this session, reopen it by clearing checkedOutAt.
       const ws = await (db as any).workerSession.upsert({
         where: {
           workerId_sessionId: { workerId, sessionId: session.id },
         },
-        update: {},
+        update: { checkedOutAt: null },
         create: { workerId, sessionId: session.id },
+        include: { worker: { include: { user: true } } },
       });
 
-      return reply.code(201).send(ws);
+      return reply.code(201).send(serializeWorkerSession(ws));
+    } catch (error) {
+      return handleRouteError(error, reply);
+    }
+  });
+
+  // Worker clock-out from current session
+  app.post("/api/sessions/current/worker-clockout", async (request, reply) => {
+    try {
+      const body = asObject(request.body);
+      const workerId = requiredString(body.workerId, "workerId");
+
+      const session = await (db as any).session.findFirst({
+        where: { status: "open" },
+        orderBy: { openedAt: "desc" },
+      });
+      if (!session) {
+        return reply.code(400).send({ error: "No open session" });
+      }
+
+      const ws = await (db as any).workerSession.findFirst({
+        where: { workerId, sessionId: session.id },
+      });
+      if (!ws) {
+        return reply.code(404).send({ error: "Worker not checked in for this session" });
+      }
+      if (ws.checkedOutAt) {
+        return reply.code(400).send({ error: "Worker already clocked out" });
+      }
+
+      const activeTurn = await (db as any).turn.findMany({
+        where: {
+          workerId,
+          sessionId: session.id,
+          status: { in: ["assigned", "in_service"] },
+        },
+        take: 1,
+      });
+      if (activeTurn.length > 0) {
+        return reply.code(400).send({ error: "Cannot clock out worker with active assigned or in-service work" });
+      }
+
+      const updated = await (db as any).workerSession.update({
+        where: { id: ws.id },
+        data: { checkedOutAt: new Date() },
+        include: { worker: { include: { user: true } } },
+      });
+
+      return reply.code(200).send(serializeWorkerSession(updated));
     } catch (error) {
       return handleRouteError(error, reply);
     }
@@ -143,12 +202,7 @@ export async function registerSessionRoutes(app: FastifyInstance, db: DbClient) 
         orderBy: { checkedInAt: "asc" },
       });
 
-      return workerSessions.map((ws: any) => ({
-        id: ws.id,
-        workerId: ws.workerId,
-        name: ws.worker?.displayName || ws.worker?.user?.name || "Worker",
-        checkedInAt: ws.checkedInAt,
-      }));
+      return workerSessions.map(serializeWorkerSession);
     } catch (error) {
       return handleRouteError(error, reply);
     }

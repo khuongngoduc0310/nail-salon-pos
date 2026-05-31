@@ -1,0 +1,1 @@
+{"code":"import{PrismaClient}from\"@prisma/client\";export{PrismaClient};\n","warnings":[],"map":{"version":3,"mappings":"AAAA,OAAS,iBAAoB","names":[],"ignoreList":[],"sources":["C:\\Projects\\nail-salon-pos-codex-pack\\packages\\db\\src\\index.ts"],"sourcesContent":[null]}}

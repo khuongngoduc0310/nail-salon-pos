@@ -4,19 +4,49 @@ import "./styles.css";
 
 const API_BASE = import.meta.env?.VITE_API_BASE_URL ?? "http://localhost:4000/api";
 
-async function get<T>(path: string): Promise<T> {
-  const r = await fetch(`${API_BASE}${path}`);
-  if (!r.ok) throw new Error(`${r.status}`);
+/* ════════════════════════════════════════
+   HTTP helpers — pass token when available
+   ════════════════════════════════════════ */
+
+function buildHeaders(token?: string): Record<string, string> {
+  const h: Record<string, string> = { "Content-Type": "application/json" };
+  if (token) h["Authorization"] = `Bearer ${token}`;
+  return h;
+}
+
+async function get<T>(path: string, token?: string): Promise<T> {
+  const r = await fetch(`${API_BASE}${path}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  if (!r.ok) {
+    let detail = `${r.status}`;
+    try { const body = await r.json(); if (body?.error) detail = body.error; } catch {}
+    throw new Error(detail);
+  }
   return r.json() as Promise<T>;
 }
-async function post<T>(path: string, body: unknown): Promise<T> {
-  const r = await fetch(`${API_BASE}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  if (!r.ok) throw new Error(`${r.status}`);
+async function post<T>(path: string, body: unknown, token?: string): Promise<T> {
+  const r = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: buildHeaders(token),
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    let detail = `${r.status}`;
+    try { const bodyErr = await r.json(); if (bodyErr?.error) detail = bodyErr.error; } catch {}
+    throw new Error(detail);
+  }
   return r.json() as Promise<T>;
 }
-async function patch<T>(path: string, body: unknown): Promise<T> {
-  const r = await fetch(`${API_BASE}${path}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  if (!r.ok) throw new Error(`${r.status}`);
+async function patch<T>(path: string, body: unknown, token?: string): Promise<T> {
+  const r = await fetch(`${API_BASE}${path}`, {
+    method: "PATCH",
+    headers: buildHeaders(token),
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    let detail = `${r.status}`;
+    try { const bodyErr = await r.json(); if (bodyErr?.error) detail = bodyErr.error; } catch {}
+    throw new Error(detail);
+  }
   return r.json() as Promise<T>;
 }
 
@@ -44,26 +74,34 @@ type WorkerState = {
 function App() {
   const [view, setView] = useState<View>("login");
   const [worker, setWorker] = useState<WorkerState | null>(null);
+  const [token, setToken] = useState<string | null>(null);
 
-  if (!worker) {
-    return <LoginScreen onLogin={(w: WorkerState) => { setWorker(w); setView("dashboard"); }} />;
+  if (!worker || !token) {
+    return <LoginScreen onLogin={(w: WorkerState, t: string) => { setWorker(w); setToken(t); setView("dashboard"); }} />;
   }
 
   const handleStartService = async () => {
-    if (!worker?.activeTurn?.id) return;
+    if (!worker?.activeTurn?.id) {
+      alert("No active service assigned. Wait for a turn to be assigned by the owner.");
+      return;
+    }
     try {
-      await post(`/turns/${worker.activeTurn.id}/start`, { workerId: worker.id });
+      await post(`/turns/${worker.activeTurn.id}/start`, { workerId: worker.id }, token);
       setWorker({ ...worker, status: "in_service" });
       await refreshWorker();
-    } catch { /* ignore */ }
+    } catch (e: any) {
+      alert(e?.message || "Failed to start service");
+    }
   };
 
   const handleCompleteService = async () => {
     if (!worker?.activeTurn?.id) return;
     try {
-      await post(`/turns/${worker.activeTurn.id}/complete`, { workerId: worker.id });
+      await post(`/turns/${worker.activeTurn.id}/complete`, { workerId: worker.id }, token);
       await refreshWorker();
-    } catch { /* ignore */ }
+    } catch (e: any) {
+      alert(e?.message || "Failed to complete service");
+    }
   };
 
   // WebSocket sync — auto-refresh on any event
@@ -84,15 +122,17 @@ function App() {
   const handleStatusChange = async (status: string) => {
     if (!worker) return;
     try {
-      await patch(`/workers/${worker.id}/status`, { status });
+      await patch(`/workers/${worker.id}/status`, { status }, token);
       setWorker({ ...worker, status });
-    } catch { /* ignore */ }
+    } catch (e: any) {
+      alert(e?.message || "Failed to update status");
+    }
   };
 
   const refreshWorker = async () => {
     if (!worker) return;
     try {
-      const data: any = await get(`/workers/${worker.id}/dashboard`);
+      const data: any = await get(`/workers/${worker.id}/dashboard`, token);
       const turn = data.activeTurn || null;
       setWorker({
         ...worker,
@@ -103,14 +143,21 @@ function App() {
         commissionRate: data.commissionRate ?? worker.commissionRate,
         activeTurn: turn ? { id: turn.id, customerName: turn.customerName, startedAt: turn.startedAt } : null,
       });
-    } catch { /* ignore */ }
+    } catch (e: any) {
+      if (e?.message?.includes("401") || e?.message?.includes("403")) {
+        // Token expired or invalid — force re-login
+        setWorker(null);
+        setToken(null);
+        setView("login");
+      }
+    }
   };
 
   return (
     <div className="has-bottom-nav">
       <div className="pwa-shell">
         {view === "dashboard" && <Dashboard worker={worker} onStartService={handleStartService} onCompleteService={handleCompleteService} onBreak={() => handleStatusChange("on_break")} onAvailable={() => handleStatusChange("available")} />}
-        {view === "appointments" && <AppointmentsScreen workerId={worker.id} />}
+        {view === "appointments" && <AppointmentsScreen workerId={worker.id} token={token} />}
         {view === "earnings" && <EarningsScreen worker={worker} />}
       </div>
       <nav className="bottom-nav">
@@ -129,14 +176,15 @@ function App() {
 }
 
 /* ════════════════════════════════════════
-   Login Screen
+   Login Screen — real PIN auth
    ════════════════════════════════════════ */
 
-function LoginScreen({ onLogin }: { onLogin: (w: WorkerState) => void }) {
+function LoginScreen({ onLogin }: { onLogin: (w: WorkerState, token: string) => void }) {
   const [workers, setWorkers] = useState<any[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [pin, setPin] = useState("");
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     get<any[]>("/workers").then((w) => setWorkers(w.filter((x: any) => x.active))).catch(() => {});
@@ -146,22 +194,39 @@ function LoginScreen({ onLogin }: { onLogin: (w: WorkerState) => void }) {
     e.preventDefault();
     if (!selectedId) { setError("Select a worker."); return; }
     if (pin.length < 4) { setError("Enter at least 4 digits."); return; }
-    const w = workers.find((x: any) => x.id === selectedId);
-    if (!w) { setError("Worker not found."); return; }
+    setError("");
+    setLoading(true);
+
     try {
-      const data: any = await get(`/workers/${w.id}/dashboard`);
-      const turn = data.activeTurn || null;
-      onLogin({
-        id: w.id,
-        name: w.displayName || w.user?.name || "Worker",
-        status: w.currentStatus,
-        turnsToday: data.turnsTakenToday ?? 0,
-        salesTodayCents: data.serviceSalesTodayCents ?? 0,
-        tipsTodayCents: data.tipsTodayCents ?? 0,
-        commissionRate: Number(w.commissionRate),
-        activeTurn: turn ? { id: turn.id, customerName: turn.customerName, startedAt: turn.startedAt } : null,
+      // Authenticate with PIN via the worker-login endpoint
+      const loginData: any = await post("/auth/worker-login", {
+        workerId: selectedId,
+        pin,
       });
-    } catch { setError("Failed to load dashboard."); }
+
+      const token = loginData.token as string;
+      if (!token) throw new Error("No token returned");
+
+      // Load full dashboard with the token
+      const dashData: any = await get(`/workers/${selectedId}/dashboard`, token);
+      const turn = dashData.activeTurn || null;
+
+      onLogin({
+        id: selectedId,
+        name: loginData.worker?.displayName || dashData.name || "Worker",
+        status: loginData.worker?.currentStatus || dashData.status || "available",
+        turnsToday: dashData.turnsTakenToday ?? 0,
+        salesTodayCents: dashData.serviceSalesTodayCents ?? 0,
+        tipsTodayCents: dashData.tipsTodayCents ?? 0,
+        commissionRate: loginData.worker?.commissionRate ?? Number(dashData.commissionRate ?? 0),
+        activeTurn: turn ? { id: turn.id, customerName: turn.customerName, startedAt: turn.startedAt } : null,
+      }, token);
+    } catch (e: any) {
+      const msg = e?.message || "Login failed";
+      setError(msg.includes("Invalid PIN") ? "Invalid PIN. Try the default: 1234" : msg);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -188,7 +253,9 @@ function LoginScreen({ onLogin }: { onLogin: (w: WorkerState) => void }) {
             </button>
           ))}
         </div>
-        <button type="submit" onClick={handleSubmit} className="btn btn--primary btn--full" style={{ marginTop: "var(--space-4)" }}>Sign In</button>
+        <button type="submit" onClick={handleSubmit} disabled={loading} className="btn btn--primary btn--full" style={{ marginTop: "var(--space-4)" }}>
+          {loading ? "Signing in…" : "Sign In"}
+        </button>
       </div>
     </div>
   );
@@ -266,11 +333,11 @@ function Dashboard({ worker, onStartService, onCompleteService, onBreak, onAvail
    Appointments
    ════════════════════════════════════════ */
 
-function AppointmentsScreen({ workerId }: { workerId: string }) {
+function AppointmentsScreen({ workerId, token }: { workerId: string; token: string | null }) {
   const [appts, setAppts] = useState<any[]>([]);
 
   useEffect(() => {
-    get<any[]>(`/appointments?workerId=${workerId}&date=${todayStr()}`).then((data) => {
+    get<any[]>(`/appointments?workerId=${workerId}&date=${todayStr()}`, token ?? undefined).then((data) => {
       setAppts((data || []).map((a: any) => ({
         id: a.id,
         time: formatTime(a.startTime),

@@ -40,6 +40,8 @@ If implementation and docs conflict, surface the mismatch and make the smallest 
 - Owner decides worker assignment; the POS may suggest but must not silently assign.
 - Turn count rules belong in shared domain logic and must stay consistent between API and UI.
 - Services are not inventory.
+- Checkout payment state must reflect backend-recorded payments only. Do not mark cash, gift card, or card payments as paid in the UI until `apps/local-api` has created an approved `Payment`; card payments must go through the payment-terminal route/adapter.
+- Sale item status values must match Prisma/shared domain enums. Use valid statuses such as `active`, `voided`, or `refunded`; do not invent UI-only statuses like `cancelled` for persisted sale items.
 
 ## Architecture Rules
 
@@ -187,4 +189,3 @@ If a command cannot be run because local services or credentials are missing, st
 - Do not run destructive Git commands such as `git reset --hard` or `git checkout --` unless explicitly requested.
 - Keep commits focused when asked to commit.
 - Use concise imperative English commit messages.
-

@@ -15,6 +15,7 @@ export type TurnDashboardWorker = {
   salesTodayCents: number;
   tipsTodayCents: number;
   suggestionRank: number | null;
+  checkedIn: boolean;
   turns: TurnDetailEntry[];
 };
 
@@ -215,10 +216,18 @@ export type CheckedInWorker = {
   workerId: string;
   name: string;
   checkedInAt: string;
+  checkedOutAt: string | null;
 };
 
 export async function workerCheckIn(workerId: string): Promise<CheckedInWorker> {
   return fetchJson("/sessions/current/worker-checkin", {
+    method: "POST",
+    body: JSON.stringify({ workerId }),
+  });
+}
+
+export async function workerClockOut(workerId: string): Promise<CheckedInWorker> {
+  return fetchJson("/sessions/current/worker-clockout", {
     method: "POST",
     body: JSON.stringify({ workerId }),
   });
@@ -313,9 +322,58 @@ export type TurnDetail = {
   createdAt: string;
 };
 
+export type SalesReportService = {
+  id: string;
+  serviceName: string;
+  workerId: string;
+  workerName: string;
+  priceCents: number;
+  discountCents: number;
+  finalServiceCents: number;
+  commissionCents: number;
+  tipsCents: number;
+  payCents: number;
+};
+
+export type SalesReportTicket = {
+  id: string;
+  completedAt: string | null;
+  customerName: string;
+  paymentMethods: string[];
+  services: SalesReportService[];
+  totals: {
+    grossServiceCents: number;
+    discountCents: number;
+    refundCents: number;
+    serviceCents: number;
+    commissionCents: number;
+    tipsCents: number;
+    payCents: number;
+    cashCents: number;
+    cardCents: number;
+    giftCardCents: number;
+    collectedCents: number;
+  };
+};
+
+export type SalesReportSummary = {
+  grossServiceSalesCents: number;
+  discountTotalCents: number;
+  refundTotalCents: number;
+  netServiceSalesCents: number;
+  tipTotalCents: number;
+  workerCommissionPayoutCents: number;
+  workerTipsPayoutCents: number;
+  totalPayCents: number;
+  cashTotalCents: number;
+  cardTotalCents: number;
+  giftCardTotalCents: number;
+  totalCollectedCents: number;
+};
+
 export async function fetchSalesReport(params?: ReportParams): Promise<{
-  summary: Record<string, number>;
-  sales: unknown[];
+  summary: SalesReportSummary;
+  sales: SalesReportTicket[];
 }> {
   const query = buildQuery(params);
   return fetchJson(`/reports/sales${query}`);
@@ -396,6 +454,9 @@ export async function addCashPayment(saleId: string, data: { amountCents: number
 }
 export async function addGiftCardPayment(saleId: string, data: { amountCents: number }): Promise<{ payment: Record<string, unknown>; sale: Record<string, unknown> }> {
   return fetchJson(`/sales/${saleId}/payments/gift-card`, { method: "POST", body: JSON.stringify(data) });
+}
+export async function addCardPayment(saleId: string, data: { amountCents: number; tipCents?: number; idempotencyKey: string }): Promise<{ payment: Record<string, unknown>; sale: Record<string, unknown>; terminalStatus: string }> {
+  return fetchJson(`/sales/${saleId}/payments/card/start`, { method: "POST", body: JSON.stringify(data) });
 }
 export async function completeSale(saleId: string): Promise<{ sale: { id: string; totalCents: number; amountPaidCents: number }; changeDueCents: number }> {
   return fetchJson(`/sales/${saleId}/complete`, { method: "POST" });

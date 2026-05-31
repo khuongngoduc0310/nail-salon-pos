@@ -21,11 +21,13 @@ import {
   removeSaleItem,
   addCashPayment,
   addGiftCardPayment,
+  addCardPayment,
   completeSale,
   fetchCurrentSession,
   openSession,
   closeSession,
   workerCheckIn,
+  workerClockOut,
   fetchCheckedInWorkers,
   fetchSettings,
   updateSettings,
@@ -44,6 +46,8 @@ import {
   type Worker,
   type Session,
   type TurnDetail,
+  type SalesReportSummary,
+  type SalesReportTicket,
 } from "./api.js";
 import {
   AmountInput,
@@ -258,32 +262,54 @@ function Dashboard({
   const [closingLoading, setClosingLoading] = useState(false);
   const [closeSummary, setCloseSummary] = useState<Record<string, number> | null>(null);
   const [checkedInWorkers, setCheckedInWorkers] = useState<CheckedInWorker[]>([]);
+  const [apiOffline, setApiOffline] = useState(false);
+  const [showWorkerCheckIn, setShowWorkerCheckIn] = useState(false);
+  const [showTurnMatrix, setShowTurnMatrix] = useState(false);
+  const [now, setNow] = useState(() => new Date());
+
+  const refreshFloor = async () => {
+    const sess = await fetchCurrentSession();
+    if (!sess) {
+      setWorkers([]);
+      setCheckins([]);
+      setCheckoutCheckins([]);
+      setCheckedInWorkers([]);
+      setSelectedCheckin(null);
+      setAssignModal(false);
+      setSession(null);
+      setStatus("No session");
+      setApiOffline(false);
+      return;
+    }
+    const [dash, waiting, ready, ciWorkers] = await Promise.all([
+      fetchTurnDashboard({ currentSessionOnly: true }),
+      fetchWaitingCheckins(),
+      fetchReadyForCheckoutCheckins(),
+      fetchCheckedInWorkers().catch(() => [] as CheckedInWorker[]),
+    ]);
+    setWorkers(dash.workers);
+    setCheckins(waiting);
+    setCheckoutCheckins(ready);
+    setSession(sess);
+    setCheckedInWorkers(ciWorkers);
+    setStatus(sess ? "Session open" : "No session");
+    setApiOffline(false);
+  };
 
   useEffect(() => {
     let cancelled = false;
     async function load() {
       try {
-        const [dash, waiting, ready, sess, ciWorkers] = await Promise.all([
-          fetchTurnDashboard(),
-          fetchWaitingCheckins(),
-          fetchReadyForCheckoutCheckins(),
-          fetchCurrentSession(),
-          fetchCheckedInWorkers().catch(() => [] as CheckedInWorker[]),
-        ]);
-        if (!cancelled) {
-          setWorkers(dash.workers);
-          setCheckins(waiting);
-          setCheckoutCheckins(ready);
-          setSession(sess);
-          setCheckedInWorkers(ciWorkers);
-          setStatus(sess ? "Session open" : "Live");
-        }
+        await refreshFloor();
       } catch {
-        if (!cancelled) setStatus("API offline — showing mock data");
         if (!cancelled) {
-          setWorkers(MOCK_WORKERS_DASHBOARD);
-          setCheckins(MOCK_CHECKINS);
-          setCheckoutCheckins(MOCK_CHECKOUT_READY);
+          setWorkers([]);
+          setCheckins([]);
+          setCheckoutCheckins([]);
+          setCheckedInWorkers([]);
+          setSession(null);
+          setApiOffline(true);
+          setStatus("API offline");
         }
       }
     }
@@ -298,16 +324,7 @@ function Dashboard({
 
     const refreshAll = async () => {
       try {
-        const [dash, waiting, ready, ciWorkers] = await Promise.all([
-          fetchTurnDashboard(),
-          fetchWaitingCheckins(),
-          fetchReadyForCheckoutCheckins(),
-          fetchCheckedInWorkers().catch(() => [] as CheckedInWorker[]),
-        ]);
-        setWorkers(dash.workers);
-        setCheckins(waiting);
-        setCheckoutCheckins(ready);
-        setCheckedInWorkers(ciWorkers);
+        await refreshFloor();
       } catch { /* silent */ }
     };
 
@@ -316,36 +333,65 @@ function Dashboard({
         ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.hostname}:4000/ws`);
         ws.onmessage = () => { void refreshAll(); };
         ws.onclose = () => { reconnect = setTimeout(connectWs, 3000); };
-        ws.onerror = () => { ws?.close(); };
+        ws.onerror = () => { /* error fires before close; let onclose handle reconnect */ };
       } catch { /* ignore */ }
     };
 
     if (session) connectWs();
     return () => {
       if (reconnect) clearTimeout(reconnect);
-      if (ws) { ws.onclose = null; ws.close(); }
+      if (ws) {
+        ws.onclose = null;
+        if (ws.readyState === WebSocket.OPEN) ws.close();
+      }
     };
   }, [session]);
 
-  const handleWorkerCheckIn = async (workerId: string) => {
-    try {
-      const w = await workerCheckIn(workerId);
-      setCheckedInWorkers((prev) => {
-        const filtered = prev.filter((c) => c.workerId !== workerId);
-        return [...filtered, w];
-      });
-    } catch { /* offline – ignore */ }
-  };
+  useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), 30000);
+    return () => clearInterval(timer);
+  }, []);
 
-  const checkedInSet = new Set(checkedInWorkers.map((c) => c.workerId));
+  const handleWorkerClockToggle = async (workerId: string) => {
+    const existing = checkedInWorkers.find((c) => c.workerId === workerId);
+    if (existing && !existing.checkedOutAt) {
+      try {
+        const w = await workerClockOut(workerId);
+        setCheckedInWorkers((prev) => prev.map((c) => (c.workerId === workerId ? w : c)));
+        await refreshFloor();
+      } catch (error) {
+        alert(error instanceof Error ? error.message : "Failed to clock out worker");
+      }
+    } else {
+      try {
+        const w = await workerCheckIn(workerId);
+        setCheckedInWorkers((prev) => {
+          const filtered = prev.filter((c) => c.workerId !== workerId);
+          return [...filtered, w];
+        });
+        await refreshFloor();
+      } catch (error) {
+        alert(error instanceof Error ? error.message : "Failed to clock in worker");
+      }
+    }
+  };
+  const checkedInSet = new Set(
+    checkedInWorkers.filter((c) => !c.checkedOutAt).map((c) => c.workerId),
+  );
+
+  const clockedOutSet = new Set(
+    checkedInWorkers.filter((c) => c.checkedOutAt).map((c) => c.workerId),
+  );
 
   const handleStartDay = async () => {
     try {
       const s = await openSession({});
       setSession(s);
       setStatus("Session open");
+      setApiOffline(false);
+      await refreshFloor();
     } catch {
-      // silent
+      setApiOffline(true);
     }
   };
 
@@ -357,7 +403,13 @@ function Dashboard({
       const result = await closeSession(session.id, { closingCashCents: cash });
       setCloseSummary(result.summary);
       setSession(null);
-      setStatus("Live");
+      setStatus("No session");
+      setWorkers([]);
+      setCheckins([]);
+      setCheckoutCheckins([]);
+      setCheckedInWorkers([]);
+      setSelectedCheckin(null);
+      setAssignModal(false);
     } catch {
       // silent
     } finally {
@@ -367,11 +419,61 @@ function Dashboard({
 
   const activeTurns = workers.filter((w) => w.activeTurn).length;
   const readyCount = checkoutCheckins.length;
-  const totalSales = workers.reduce((s, w) => s + w.salesTodayCents, 0);
-  const totalTips = workers.reduce((s, w) => s + w.tipsTodayCents, 0);
+  const availableCount = workers.filter((w) => w.status === "available" && checkedInSet.has(w.workerId)).length;
+  const totalSales = workers.reduce((sum, worker) => sum + worker.salesTodayCents, 0);
+  const totalTips = workers.reduce((sum, worker) => sum + worker.tipsTodayCents, 0);
+  const recommendedWorker = getRecommendedWorker(workers, checkedInSet);
+
+  const handleAssignWorker = async (workerId: string) => {
+    if (!selectedCheckin) return;
+    try {
+      await assignTurn({
+        checkinId: selectedCheckin.id,
+        workerId,
+        turnType: "manual",
+        suggestedWorkerId: recommendedWorker?.workerId,
+      });
+      setSelectedCheckin(null);
+      setAssignModal(false);
+      await refreshFloor();
+    } catch {
+      setApiOffline(true);
+    }
+  };
+
+  const handleStartSale = async (checkinId: string) => {
+    await createSaleForCheckin(checkinId).catch(() => null);
+    onStartCheckout();
+  };
 
   return (
-    <>
+    <div className="floor-page">
+      <FloorSessionBar
+        session={session}
+        status={status}
+        now={now}
+        apiOffline={apiOffline}
+        onStartDay={handleStartDay}
+        onRequestEndDay={() => {
+          requestOwnerPin(
+            "Owner PIN Required",
+            "Enter owner PIN to end the day and close the current session.",
+            () => {
+              setShowCloseModal(true);
+              setClosingCashText("");
+            }
+          );
+        }}
+      />
+
+      {apiOffline && (
+        <div className="floor-alert floor-alert--offline">
+          <strong>API offline.</strong>
+          <span>Live floor data is unavailable. Check the local API before assigning turns.</span>
+        </div>
+      )}
+
+      <div className="floor-legacy-hidden">
       <header>
         <p className="eyebrow">Owner POS</p>
         <div className="app-bar">
@@ -418,6 +520,8 @@ function Dashboard({
         )}
       </div>
 
+      </div>
+
       {/* Close session modal */}
       <Modal
         open={showCloseModal}
@@ -461,6 +565,72 @@ function Dashboard({
         )}
       </Modal>
 
+      {!session ? (
+        <NoSessionFloorState apiOffline={apiOffline} onStartDay={handleStartDay} />
+      ) : (
+        <>
+          <FloorKpiStrip
+            waitingCount={checkins.length}
+            availableCount={availableCount}
+            inServiceCount={activeTurns}
+            readyCount={readyCount}
+          />
+
+          <WorkerCheckInPanel
+            open={showWorkerCheckIn}
+            workers={workers}
+            checkedInWorkers={checkedInWorkers}
+            onToggle={() => setShowWorkerCheckIn((value) => !value)}
+            onClockToggle={handleWorkerClockToggle}
+          />
+
+          <div className="floor-workspace">
+            <WaitingQueuePanel
+              checkins={checkins}
+              selectedCheckinId={selectedCheckin?.id ?? null}
+              recommendedWorkerName={recommendedWorker?.name ?? null}
+              onSelect={(checkin) => setSelectedCheckin(checkin)}
+              onAssignRecommended={() => {
+                if (recommendedWorker) void handleAssignWorker(recommendedWorker.workerId);
+              }}
+              onOpenFallback={() => setAssignModal(true)}
+            />
+            <WorkerBoard
+              workers={workers}
+              checkedInSet={checkedInSet}
+              selectedCustomerName={selectedCheckin?.customer?.name ?? (selectedCheckin ? "Walk-in" : null)}
+              recommendedWorkerId={recommendedWorker?.workerId ?? null}
+              onAssign={handleAssignWorker}
+            />
+            <ReadyCheckoutRail
+              checkins={checkoutCheckins}
+              onStartSale={(checkinId) => { void handleStartSale(checkinId); }}
+            />
+          </div>
+
+          <TurnMatrixPanel
+            open={showTurnMatrix}
+            workers={workers}
+            onToggleOpen={() => setShowTurnMatrix((value) => !value)}
+            onToggleTurnCount={async (turnId, newCount) => {
+              await updateTurnCount(turnId, newCount).catch(() => {});
+              setWorkers((prev) => prev.map((w) => {
+                const updatedTurns = w.turns.map((t) => t.turnId === turnId ? { ...t, turnCount: newCount } : t);
+                return {
+                  ...w,
+                  turns: updatedTurns,
+                  turnsTakenToday: updatedTurns
+                    .filter((t) => t.status === "completed" || t.status === "in_service")
+                    .reduce((s, t) => s + t.turnCount, 0),
+                };
+              }));
+            }}
+          />
+        </>
+      )}
+
+      <div className="floor-legacy-hidden">
+
       {/* Worker Check-in bar */}
       {session && workers.length > 0 && (
         <div style={{ marginBottom: "var(--space-4)", padding: "var(--space-4)", background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: "var(--radius-lg)", boxShadow: "var(--shadow-sm)" }}>
@@ -474,7 +644,7 @@ function Dashboard({
               return (
                 <button
                   key={w.workerId}
-                  onClick={() => { if (!isCheckedIn) void handleWorkerCheckIn(w.workerId); }}
+                  onClick={() => { void handleWorkerClockToggle(w.workerId); }}
                   disabled={isCheckedIn}
                   title={isCheckedIn ? `Checked in at ${new Date(checkedInWorkers.find((c) => c.workerId === w.workerId)?.checkedInAt ?? "").toLocaleTimeString()}` : "Click to check in"}
                   style={{
@@ -668,6 +838,8 @@ function Dashboard({
         />
       )}
 
+      </div>
+
       {/* Assign worker modal */}
       {selectedCheckin && (
         <Modal open={assignModal} onClose={() => setAssignModal(false)} title={`Assign — ${selectedCheckin.customer?.name ?? "Walk-in"}`} footer={
@@ -675,32 +847,12 @@ function Dashboard({
         }>
           <p className="text-muted text-sm mb-4">Select a worker to assign this customer.</p>
           <div className="checkin-list">
-            {workers.filter((w) => w.status !== "off_today" && w.status !== "on_break" && w.status !== "in_service").map((w) => (
+            {workers.filter((w) => w.checkedIn && w.status !== "off_today" && w.status !== "on_break" && w.status !== "in_service").map((w) => (
               <div
                 key={w.workerId}
                 className="checkin-item"
                 style={{ cursor: "pointer" }}
-                onClick={async () => {
-                  try {
-                    await assignTurn({
-                      checkinId: selectedCheckin.id,
-                      workerId: w.workerId,
-                      turnType: "manual",
-                      suggestedWorkerId: w.suggestionRank != null ? w.workerId : undefined,
-                    });
-                    // Refresh dashboard data after assignment
-                    const [dash, waiting, ready] = await Promise.all([
-                      fetchTurnDashboard(),
-                      fetchWaitingCheckins(),
-                      fetchReadyForCheckoutCheckins(),
-                    ]);
-                    setWorkers(dash.workers);
-                    setCheckins(waiting);
-                    setCheckoutCheckins(ready);
-                  } catch { /* silent */ }
-                  setAssignModal(false);
-                  setSelectedCheckin(null);
-                }}
+                onClick={() => { void handleAssignWorker(w.workerId); }}
               >
                 <div className="checkin-item__top">
                   <span className="checkin-item__name">{w.name}</span>
@@ -715,7 +867,7 @@ function Dashboard({
           </div>
         </Modal>
       )}
-    </>
+    </div>
   );
 }
 
@@ -723,10 +875,472 @@ function Dashboard({
    Assign Customers Screen
    ════════════════════════════════════════ */
 
+function FloorSessionBar({
+  session,
+  status,
+  now,
+  apiOffline,
+  onStartDay,
+  onRequestEndDay,
+}: {
+  session: Session | null;
+  status: string;
+  now: Date;
+  apiOffline: boolean;
+  onStartDay: () => void;
+  onRequestEndDay: () => void;
+}) {
+  return (
+    <header className="floor-topbar">
+      <div className="floor-topbar__title">
+        <p className="eyebrow">Owner POS</p>
+        <h1 className="floor-title">Salon Floor</h1>
+      </div>
+      <div className="floor-topbar__meta">
+        <span className="floor-clock">
+          {now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+        </span>
+        <Badge variant={apiOffline ? "danger" : session ? "success" : "warning"}>
+          {apiOffline ? "Offline" : status}
+        </Badge>
+        {session ? (
+          <>
+            <span className="floor-session-time">
+              Open {new Date(session.openedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+            </span>
+            <Button size="sm" variant="ghost" onClick={onRequestEndDay}>
+              End Day
+            </Button>
+          </>
+        ) : (
+          <Button size="md" onClick={onStartDay}>
+            Start Day
+          </Button>
+        )}
+      </div>
+    </header>
+  );
+}
+
+function NoSessionFloorState({
+  apiOffline,
+  onStartDay,
+}: {
+  apiOffline: boolean;
+  onStartDay: () => void;
+}) {
+  return (
+    <Card padding="lg" className="floor-start-card">
+      <EmptyState
+        icon="Open"
+        title={apiOffline ? "Local API offline" : "Start the day"}
+        description={
+          apiOffline
+            ? "The Floor page only shows live session data. Start the local API before opening the floor."
+            : "Open a salon session to load workers, the waiting queue, and checkout-ready customers."
+        }
+        action={
+          apiOffline ? null : (
+            <Button size="lg" onClick={onStartDay}>
+              Start Day
+            </Button>
+          )
+        }
+      />
+    </Card>
+  );
+}
+
+function FloorKpiStrip({
+  waitingCount,
+  availableCount,
+  inServiceCount,
+  readyCount,
+}: {
+  waitingCount: number;
+  availableCount: number;
+  inServiceCount: number;
+  readyCount: number;
+}) {
+  return (
+    <section className="floor-kpis" aria-label="Floor assignment summary">
+      <FloorKpi label="Waiting" value={waitingCount} tone="warning" />
+      <FloorKpi label="Available" value={availableCount} tone="success" />
+      <FloorKpi label="In Service" value={inServiceCount} tone="info" />
+      <FloorKpi label="Ready" value={readyCount} tone="success" />
+    </section>
+  );
+}
+
+function FloorKpi({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone: "success" | "warning" | "info";
+}) {
+  return (
+    <div className={`floor-kpi floor-kpi--${tone}`}>
+      <span className="floor-kpi__label">{label}</span>
+      <strong className="floor-kpi__value">{value}</strong>
+    </div>
+  );
+}
+
+function WorkerCheckInPanel({
+  open,
+  workers,
+  checkedInWorkers,
+  onToggle,
+  onClockToggle,
+}: {
+  open: boolean;
+  workers: TurnDashboardWorker[];
+  checkedInWorkers: CheckedInWorker[];
+  onToggle: () => void;
+  onClockToggle: (workerId: string) => void;
+}) {
+  const checkedInSet = new Set(
+    checkedInWorkers.filter((c) => !c.checkedOutAt).map((worker) => worker.workerId),
+  );
+  const clockedOutSet = new Set(
+    checkedInWorkers.filter((c) => c.checkedOutAt).map((worker) => worker.workerId),
+  );
+  return (
+    <Card padding="md" className="floor-collapse">
+      <button className="floor-collapse__header" type="button" onClick={onToggle} aria-expanded={open}>
+        <span>
+          <strong>Worker Clock In / Out</strong>
+          <small>{checkedInSet.size}/{workers.length} clocked in</small>
+        </span>
+        <Badge variant={open ? "info" : "default"}>{open ? "Hide" : "Show"}</Badge>
+      </button>
+      {open && (
+        <div className="floor-worker-checkin">
+          {workers.length === 0 ? (
+            <p className="text-muted text-sm">No workers loaded for this session.</p>
+          ) : (
+            workers.map((worker) => {
+              const isClockedIn = checkedInSet.has(worker.workerId);
+              const isClockedOut = clockedOutSet.has(worker.workerId);
+              const entry = checkedInWorkers.find((e) => e.workerId === worker.workerId);
+              return (
+                <button
+                  key={worker.workerId}
+                  className={`floor-checkin-chip ${isClockedIn ? "floor-checkin-chip--checked" : ""} ${isClockedOut ? "floor-checkin-chip--clocked-out" : ""}`}
+                  type="button"
+                  disabled={worker.status === "off_today"}
+                  onClick={() => onClockToggle(worker.workerId)}
+                >
+                  <span>{worker.name}</span>
+                  <small>
+                    {isClockedIn && entry
+                      ? `In ${new Date(entry.checkedInAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+                      : isClockedOut
+                        ? "Clocked out"
+                        : worker.status === "off_today"
+                          ? "Off today"
+                          : "Tap to clock in"}
+                  </small>
+                </button>
+              );
+            })
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function WaitingQueuePanel({
+  checkins,
+  selectedCheckinId,
+  recommendedWorkerName,
+  onSelect,
+  onAssignRecommended,
+  onOpenFallback,
+}: {
+  checkins: Checkin[];
+  selectedCheckinId: string | null;
+  recommendedWorkerName: string | null;
+  onSelect: (checkin: Checkin) => void;
+  onAssignRecommended: () => void;
+  onOpenFallback: () => void;
+}) {
+  return (
+    <Card padding="lg" className="floor-panel floor-panel--queue">
+      <div className="card__header">
+        <div>
+          <p className="eyebrow">Primary workflow</p>
+          <h2 className="card__title">Waiting Queue</h2>
+        </div>
+        <Badge variant="warning">{checkins.length}</Badge>
+      </div>
+      {checkins.length === 0 ? (
+        <EmptyState icon="Queue" title="No customers waiting" description="Waiting check-ins appear here after the day is started." />
+      ) : (
+        <div className="floor-queue-list">
+          {checkins.map((checkin) => {
+            const selected = selectedCheckinId === checkin.id;
+            return (
+              <div
+                key={checkin.id}
+                role="button"
+                tabIndex={0}
+                className={`floor-queue-card ${selected ? "floor-queue-card--selected" : ""}`}
+                onClick={() => onSelect(checkin)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onSelect(checkin);
+                  }
+                }}
+              >
+                <span className="floor-queue-card__main">
+                  <strong>{checkin.customer?.name ?? "Walk-in"}</strong>
+                  <small>{checkin.notes || "No service request noted"}</small>
+                </span>
+                <span className="floor-queue-card__meta">
+                  <span>{timeAgo(checkin.checkedInAt)}</span>
+                  <StatusPill status={checkin.status} />
+                </span>
+                {selected && (
+                  <span className="floor-queue-card__actions">
+                    <Button
+                      size="sm"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onAssignRecommended();
+                      }}
+                      disabled={!recommendedWorkerName}
+                    >
+                      Assign {recommendedWorkerName ?? "Worker"}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onOpenFallback();
+                      }}
+                    >
+                      Choose
+                    </Button>
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function WorkerBoard({
+  workers,
+  checkedInSet,
+  selectedCustomerName,
+  recommendedWorkerId,
+  onAssign,
+}: {
+  workers: TurnDashboardWorker[];
+  checkedInSet: Set<string>;
+  selectedCustomerName: string | null;
+  recommendedWorkerId: string | null;
+  onAssign: (workerId: string) => void;
+}) {
+  const groups = [
+    { status: "available", label: "Available" },
+    { status: "in_service", label: "In Service" },
+    { status: "on_break", label: "On Break" },
+    { status: "off_today", label: "Off Today" },
+  ];
+
+  return (
+    <Card padding="lg" className="floor-panel floor-panel--workers">
+      <div className="card__header">
+        <div>
+          <p className="eyebrow">{selectedCustomerName ? `Assigning ${selectedCustomerName}` : "Worker status"}</p>
+          <h2 className="card__title">Worker Board</h2>
+        </div>
+        <Badge variant="info">{workers.length}</Badge>
+      </div>
+      {workers.length === 0 ? (
+        <EmptyState icon="Staff" title="No workers loaded" description="Start a session and check the local API to show worker status." />
+      ) : (
+        <div className="floor-worker-groups">
+          {groups.map((group) => {
+            const groupedWorkers = sortWorkersForFloor(workers).filter((worker) => worker.status === group.status);
+            if (groupedWorkers.length === 0) return null;
+            return (
+              <section key={group.status} className="floor-worker-group">
+                <div className="floor-worker-group__header">
+                  <span>{group.label}</span>
+                  <Badge variant="default">{groupedWorkers.length}</Badge>
+                </div>
+                <div className="floor-worker-list">
+                  {groupedWorkers.map((worker) => (
+                    <FloorWorkerCard
+                      key={worker.workerId}
+                      worker={worker}
+                      checkedIn={checkedInSet.has(worker.workerId)}
+                      selectedCustomerName={selectedCustomerName}
+                      recommended={recommendedWorkerId === worker.workerId}
+                      onAssign={onAssign}
+                    />
+                  ))}
+                </div>
+              </section>
+            );
+          })}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function FloorWorkerCard({
+  worker,
+  checkedIn,
+  selectedCustomerName,
+  recommended,
+  onAssign,
+}: {
+  worker: TurnDashboardWorker;
+  checkedIn: boolean;
+  selectedCustomerName: string | null;
+  recommended: boolean;
+  onAssign: (workerId: string) => void;
+}) {
+  const activeTurn = worker.activeTurn as { customerName?: string; serviceName?: string; startedAt?: string } | null;
+  const assignable = Boolean(selectedCustomerName && worker.status === "available" && checkedIn);
+
+  return (
+    <button
+      type="button"
+      className={[
+        "floor-worker-card",
+        assignable ? "floor-worker-card--assignable" : "",
+        recommended ? "floor-worker-card--recommended" : "",
+      ].filter(Boolean).join(" ")}
+      disabled={!assignable}
+      onClick={() => onAssign(worker.workerId)}
+    >
+      <span className="floor-worker-card__top">
+        <span className="floor-worker-card__identity">
+          <span className={`worker-card__avatar ${statusAvatarClass(worker.status)}`}>
+            {(worker.name || "?")[0].toUpperCase()}
+          </span>
+          <span className="floor-worker-card__name-stack">
+            <strong>{worker.name}</strong>
+            <small>{checkedIn ? "Checked in" : "Not checked in"}</small>
+          </span>
+        </span>
+        <span className="floor-worker-card__badges">
+          {recommended && <Badge variant="success">Recommended</Badge>}
+          <StatusPill status={worker.status} />
+        </span>
+      </span>
+      <span className="floor-worker-card__stats">
+        <span>{worker.turnsTakenToday} turns</span>
+        <span>{worker.lastTurnEndedAt ? `Last ${timeAgo(worker.lastTurnEndedAt)}` : "No completed turns"}</span>
+        {worker.suggestionRank != null && <span>Rank #{worker.suggestionRank}</span>}
+      </span>
+      {activeTurn && (
+        <span className="floor-worker-card__active">
+          <strong>{activeTurn.customerName || "Customer"}</strong>
+          <small>{activeTurn.serviceName || "Service in progress"}</small>
+        </span>
+      )}
+      {assignable && (
+        <span className="floor-worker-card__cta">
+          Tap to assign{selectedCustomerName ? ` ${selectedCustomerName}` : ""}
+        </span>
+      )}
+    </button>
+  );
+}
+
+function ReadyCheckoutRail({
+  checkins,
+  onStartSale,
+}: {
+  checkins: Checkin[];
+  onStartSale: (checkinId: string) => void;
+}) {
+  return (
+    <Card padding="lg" className="floor-panel floor-panel--checkout">
+      <div className="card__header">
+        <h2 className="card__title">Ready for Checkout</h2>
+        <Badge variant="success">{checkins.length}</Badge>
+      </div>
+      {checkins.length === 0 ? (
+        <EmptyState icon="Sale" title="None ready" description="Completed turns appear here for checkout." />
+      ) : (
+        <div className="floor-checkout-list">
+          {checkins.map((checkin) => (
+            <div key={checkin.id} className="floor-checkout-item">
+              <div>
+                <strong>{checkin.customer?.name ?? "Walk-in"}</strong>
+                <small>{timeAgo(checkin.checkedInAt)}</small>
+              </div>
+              <Button size="sm" onClick={() => onStartSale(checkin.id)}>
+                Start Sale
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function TurnMatrixPanel({
+  open,
+  workers,
+  onToggleOpen,
+  onToggleTurnCount,
+}: {
+  open: boolean;
+  workers: TurnDashboardWorker[];
+  onToggleOpen: () => void;
+  onToggleTurnCount: (turnId: string, newCount: number) => Promise<void>;
+}) {
+  return (
+    <Card padding="md" className="floor-collapse">
+      <button className="floor-collapse__header" type="button" onClick={onToggleOpen} aria-expanded={open}>
+        <span>
+          <strong>Turn Matrix</strong>
+          <small>Detailed service-by-worker view</small>
+        </span>
+        <Badge variant={open ? "info" : "default"}>{open ? "Hide" : "Show"}</Badge>
+      </button>
+      {open && (
+        <div className="floor-turn-matrix">
+          <SessionGrid workers={workers} onToggleTurnCount={onToggleTurnCount} />
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function getRecommendedWorker(workers: TurnDashboardWorker[], checkedInSet: Set<string>) {
+  const availableWorkers = workers.filter((worker) => worker.status === "available" && checkedInSet.has(worker.workerId));
+  const ranked = availableWorkers.filter((worker) => worker.suggestionRank != null);
+  if (ranked.length > 0) {
+    return [...ranked].sort((a, b) => (a.suggestionRank ?? 999) - (b.suggestionRank ?? 999))[0] ?? null;
+  }
+  return sortWorkersForFloor(availableWorkers)[0] ?? null;
+}
+
 type AssignWorker = {
   id: string;
   name: string;
   status: "available" | "in_service" | "on_break" | "off_today" | "unavailable";
+  checkedIn: boolean;
   rotationRank: number | null;
   serviceCount: number;
   services: AssignServiceCell[];
@@ -787,6 +1401,7 @@ function AssignCustomersScreen() {
             id: w.workerId,
             name: w.name,
             status: (w.status as AssignWorker["status"]) || "available",
+            checkedIn: w.checkedIn,
             rotationRank: w.suggestionRank ?? null,
             serviceCount: w.turnsTakenToday,
             services: (w.turns || []).map((t) => ({
@@ -825,7 +1440,7 @@ function AssignCustomersScreen() {
   }, []);
 
   const waitingCount = customers.length;
-  const availableCount = workers.filter((w) => w.status === "available").length;
+  const availableCount = workers.filter((w) => w.status === "available" && w.checkedIn).length;
   const inServiceCount = workers.filter((w) => w.status === "in_service").length;
   const onBreakCount = workers.filter((w) => w.status === "on_break").length;
 
@@ -836,7 +1451,7 @@ function AssignCustomersScreen() {
 
   // Next available worker based on rotation
   const nextAvailableWorker = workers
-    .filter((w) => w.status === "available" && w.rotationRank != null)
+    .filter((w) => w.status === "available" && w.checkedIn && w.rotationRank != null)
     .sort((a, b) => (a.rotationRank ?? 99) - (b.rotationRank ?? 99))[0] ?? null;
 
   const sortedWorkers = [...workers].sort((a, b) => {
@@ -880,7 +1495,7 @@ function AssignCustomersScreen() {
   const handleAssignToWorker = (workerId: string) => {
     if (!selectedCustomerData) return;
     const w = workers.find((x) => x.id === workerId);
-    if (!w || w.status !== "available") return;
+    if (!w || w.status !== "available" || !w.checkedIn) return;
 
     setWorkers((prev) =>
       prev.map((w) => {
@@ -1060,7 +1675,7 @@ function AssignCustomersScreen() {
 
                 {/* Worker Rows */}
                 {sortedWorkers.map((w) => {
-                  const isAvailable = w.status === "available";
+                  const isAvailable = w.status === "available" && w.checkedIn;
                   const isSelectedTarget = selectedCustomer != null && isAvailable;
                   const isDimmed = selectedCustomer != null && !isAvailable;
 
@@ -1088,7 +1703,7 @@ function AssignCustomersScreen() {
                       <div className="assign-row__status-col">
                         <div className="assign-status-row">
                           <span className={`assign-status-pill assign-status-pill--${w.status === "available" ? "available" : w.status === "in_service" ? "in_service" : w.status === "on_break" ? "break" : "off"}`}>
-                            {w.status === "available" ? "Available" : w.status === "in_service" ? "In Service" : w.status === "on_break" ? "On Break" : w.status === "off_today" ? "Checked Out" : "Unavailable"}
+                            {!w.checkedIn ? "Clocked Out" : w.status === "available" ? "Available" : w.status === "in_service" ? "In Service" : w.status === "on_break" ? "On Break" : w.status === "off_today" ? "Off Today" : "Unavailable"}
                           </span>
                           {w.rotationRank != null && (
                             <span className={`assign-rotation ${w.rotationRank === 1 ? "assign-rotation--next" : ""}`}>
@@ -1388,14 +2003,14 @@ export const MOCK_ASSIGN_CUSTOMERS: AssignCustomer[] = [
 ];
 
 export const MOCK_ASSIGN_WORKERS: AssignWorker[] = [
-  { id: "w1", name: "Bella", status: "available", rotationRank: 1, serviceCount: 0, services: [] },
-  { id: "w2", name: "Coco", status: "available", rotationRank: 2, serviceCount: 0, services: [] },
-  { id: "w3", name: "Daisy", status: "available", rotationRank: 3, serviceCount: 0, services: [] },
-  { id: "w4", name: "Amy", status: "on_break", rotationRank: null, serviceCount: 0, services: [] },
+  { id: "w1", name: "Bella", status: "available", checkedIn: true, rotationRank: 1, serviceCount: 0, services: [] },
+  { id: "w2", name: "Coco", status: "available", checkedIn: true, rotationRank: 2, serviceCount: 0, services: [] },
+  { id: "w3", name: "Daisy", status: "available", checkedIn: true, rotationRank: 3, serviceCount: 0, services: [] },
+  { id: "w4", name: "Amy", status: "on_break", checkedIn: true, rotationRank: null, serviceCount: 0, services: [] },
 ];
 
 /* ════════════════════════════════════════
-   Checkout Screen
+   Checkout Screen — 4-column iPad layout
    ════════════════════════════════════════ */
 
 type CheckoutItem = {
@@ -1408,10 +2023,10 @@ type CheckoutItem = {
   tipCents: number;
 };
 
-type CheckoutStep = "start" | "build" | "pay" | "done";
+type CheckoutMode = "active" | "done";
 
 function CheckoutScreen({ onBack }: { onBack: () => void }) {
-  const [step, setStep] = useState<CheckoutStep>("start");
+  const [mode, setMode] = useState<CheckoutMode>("active");
   const [saleId, setSaleId] = useState<string | null>(null);
   const [items, setItems] = useState<CheckoutItem[]>([]);
   const [services, setServices] = useState<Service[]>([]);
@@ -1423,15 +2038,32 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
   const [error, setError] = useState("");
   const [activeMethod, setActiveMethod] = useState("cash");
   const [changeCents, setChangeCents] = useState(0);
+  const [hasStarted, setHasStarted] = useState(false);
+  const [activeCategory, setActiveCategory] = useState("All");
 
   const subtotal = items.reduce((s, i) => s + i.priceCents, 0);
   const discounts = items.reduce((s, i) => s + i.discountCents, 0);
   const tips = items.reduce((s, i) => s + i.tipCents, 0);
-  const total = Math.round(subtotal - discounts + tips);
+  const total = Math.round(subtotal + tips - discounts);
   const paid = Math.round(payments.reduce((s, p) => s + p.amountCents, 0));
   const remaining = Math.max(0, total - paid);
 
   const selectedWorker = workers.find((w) => w.id === selectedWorkerId) ?? null;
+  const selectedWorkerName = selectedWorker
+    ? (selectedWorker.displayName || selectedWorker.user?.name || "Worker")
+    : null;
+
+  const categoryNames = ["All", ...Array.from(new Set(services.map((s) => s.category?.name).filter(Boolean)))] as string[];
+  const filteredServices = activeCategory === "All"
+    ? services
+    : services.filter((s) => (s.category?.name ?? "") === activeCategory);
+
+  const statusDotColor = (status: string) => {
+    if (status === "available") return "var(--color-success)";
+    if (status === "in_service") return "var(--color-info)";
+    if (status === "on_break") return "var(--color-warning)";
+    return "var(--color-border)";
+  };
 
   const initSale = async () => {
     setLoading(true);
@@ -1445,7 +2077,7 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
       setSaleId(sale.id);
       setServices(svcs);
       setWorkers(wrks.filter((w) => w.active));
-      setStep("build");
+      setHasStarted(true);
     } catch {
       setError("Failed to start sale. Check API connection.");
     } finally {
@@ -1453,9 +2085,14 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
     }
   };
 
+  const handleSelectWorker = (worker: Worker) => {
+    setError("");
+    setSelectedWorkerId(worker.id);
+  };
+
   const handleSelectService = async (svc: Service) => {
     if (!selectedWorkerId || !saleId) {
-      setError("Please select a worker first before adding a service.");
+      setError("Select a worker first before adding a service.");
       return;
     }
     setError("");
@@ -1474,7 +2111,7 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
         {
           saleItemId,
           serviceName: svc.name,
-          workerName: selectedWorker?.displayName || selectedWorker?.user?.name || "Worker",
+          workerName: selectedWorkerName || "Worker",
           category: svc.category?.name ?? "",
           priceCents: svc.priceCents,
           discountCents: 0,
@@ -1482,15 +2119,10 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
         },
       ]);
     } catch {
-      setError("Failed to add service to sale.");
+      setError("Failed to add service.");
     } finally {
       setLoading(false);
     }
-  };
-
-  const handleSelectWorker = (worker: Worker) => {
-    setError("");
-    setSelectedWorkerId(worker.id);
   };
 
   const removeItem = async (idx: number) => {
@@ -1498,27 +2130,60 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
     if (item?.saleItemId && saleId) {
       try {
         await removeSaleItem(saleId, item.saleItemId);
-      } catch {
-        // proceed to remove locally even if API fails
-      }
+      } catch { /* ignore */ }
     }
     setItems(items.filter((_, i) => i !== idx));
+  };
+
+  const updateTip = (idx: number, delta: number) => {
+    setItems((prev) =>
+      prev.map((it, i) =>
+        i === idx
+          ? { ...it, tipCents: Math.max(0, it.tipCents + delta) }
+          : it
+      )
+    );
+  };
+
+  const makePaymentIdempotencyKey = () => {
+    const randomId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    return `owner-pos-${saleId}-${randomId}`;
+  };
+
+  const recordPayment = async (amount: number) => {
+    if (!saleId || amount <= 0) return;
+
+    if (activeMethod === "cash") {
+      await addCashPayment(saleId, { amountCents: amount });
+    } else if (activeMethod === "gift_card") {
+      await addGiftCardPayment(saleId, { amountCents: amount });
+    } else if (activeMethod === "card") {
+      const result = await addCardPayment(saleId, {
+        amountCents: amount,
+        tipCents: 0,
+        idempotencyKey: makePaymentIdempotencyKey(),
+      });
+      if (result.terminalStatus !== "approved") {
+        throw new Error("Card payment was not approved.");
+      }
+    } else {
+      throw new Error("Select a payment method.");
+    }
+
+    setPayments((prev) => [...prev, { method: activeMethod, amountCents: amount }]);
   };
 
   const addPayment = async () => {
     if (!saleId || amountCents <= 0) return;
     const capped = Math.min(amountCents, Math.max(remaining, 0));
+    if (capped <= 0) return;
     setLoading(true);
+    setError("");
     try {
-      if (activeMethod === "cash") {
-        await addCashPayment(saleId, { amountCents: capped });
-      } else if (activeMethod === "gift_card") {
-        await addGiftCardPayment(saleId, { amountCents: capped });
-      }
-      setPayments([...payments, { method: activeMethod, amountCents: capped }]);
+      await recordPayment(capped);
       setAmountCents(0);
-    } catch {
-      setError("Payment failed.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Payment failed.");
     } finally {
       setLoading(false);
     }
@@ -1531,15 +2196,11 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
   const exactPayment = async () => {
     if (!saleId || remaining <= 0) return;
     setLoading(true);
+    setError("");
     try {
-      if (activeMethod === "cash") {
-        await addCashPayment(saleId, { amountCents: remaining });
-      } else if (activeMethod === "gift_card") {
-        await addGiftCardPayment(saleId, { amountCents: remaining });
-      }
-      setPayments([...payments, { method: activeMethod, amountCents: remaining }]);
-    } catch {
-      setError("Payment failed.");
+      await recordPayment(remaining);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Payment failed.");
     } finally {
       setLoading(false);
     }
@@ -1551,7 +2212,7 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
     try {
       const result = await completeSale(saleId);
       setChangeCents(result.changeDueCents);
-      setStep("done");
+      setMode("done");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to complete sale.");
     } finally {
@@ -1559,295 +2220,254 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
     }
   };
 
-  // Done screen
-  if (step === "done") {
-    return (
-      <>
-        <header>
-          <p className="eyebrow">Checkout</p>
-          <h1>Sale Complete 🎉</h1>
-        </header>
-        <Card padding="lg" className="mt-4">
-          <div style={{ textAlign: "center", padding: "var(--space-8) 0" }}>
-            <div style={{ fontSize: "3rem", marginBottom: "var(--space-4)" }}>✅</div>
-            <h2 style={{ margin: "0 0 var(--space-2)" }}>Payment Received</h2>
-            <MoneyDisplay cents={total} className="money--large" />
-            <p className="text-muted text-sm mt-2">
-              Paid {formatMoney(paid)} across {payments.length} method(s)
-            </p>
-            {changeCents > 0 && (
-              <p style={{ color: "var(--color-success)" }}>
-                Change due: {formatMoney(changeCents)}
-              </p>
-            )}
-          </div>
-          <div style={{ display: "flex", gap: "var(--space-3)", justifyContent: "center", marginTop: "var(--space-4)" }}>
-            <Button onClick={() => {
-              setStep("start");
-              setSaleId(null);
-              setItems([]);
-              setPayments([]);
-              setSelectedWorkerId(null);
-              setChangeCents(0);
-            }}>
-              New Sale
-            </Button>
-          </div>
-        </Card>
-        {items.length > 0 && (
-          <ReceiptPreview
-            items={items}
-            payments={payments}
-            subtotal={subtotal}
-            discounts={discounts}
-            tips={tips}
-            total={total}
-          />
-        )}
-        <div className="mt-4">
-          <Button variant="ghost" onClick={onBack}>← Back to Floor</Button>
-        </div>
-      </>
-    );
-  }
+  const resetSale = () => {
+    setSaleId(null);
+    setItems([]);
+    setPayments([]);
+    setSelectedWorkerId(null);
+    setAmountCents(0);
+    setChangeCents(0);
+    setError("");
+    setHasStarted(false);
+    setActiveCategory("All");
+    setMode("active");
+  };
 
-  // Start screen
-  if (step === "start") {
+  // ── Done overlay ──
+  if (mode === "done") {
     return (
-      <>
-        <header>
-          <p className="eyebrow">Checkout</p>
-          <div className="app-bar">
-            <h1 className="app-bar__title">New Sale</h1>
-            <Button variant="ghost" size="sm" onClick={onBack}>← Floor</Button>
-          </div>
-        </header>
-        <Card padding="lg">
-          <h2 className="card__title mb-2">Start a Sale</h2>
-          <p className="text-muted text-sm mb-4">
-            Tap below to create a new walk-in sale. Then select a worker and add services.
+      <div className="checkout-done-overlay">
+        <span className="checkout-done-overlay__icon">✅</span>
+        <h2 className="checkout-done-overlay__title">Payment Received</h2>
+        <MoneyDisplay cents={total} className="checkout-done-overlay__total" />
+        <p className="checkout-done-overlay__meta">
+          Paid {formatMoney(paid)} across {payments.length} method{payments.length !== 1 ? "s" : ""}
+        </p>
+        {changeCents > 0 && (
+          <p style={{ color: "var(--color-success)", fontSize: "var(--text-md)", fontWeight: "var(--font-semibold)" }}>
+            Change due: {formatMoney(changeCents)}
           </p>
-          <Button fullWidth size="lg" loading={loading} onClick={initSale}>
-            🚶 Walk-in Customer
+        )}
+        {items.length > 0 && (
+          <div style={{ width: "100%", maxWidth: "400px", marginTop: "var(--space-4)" }}>
+            <ReceiptPreview
+              items={items}
+              payments={payments}
+              subtotal={subtotal}
+              discounts={discounts}
+              tips={tips}
+              total={total}
+            />
+          </div>
+        )}
+        <div className="checkout-done-overlay__actions">
+          <Button onClick={resetSale}>New Sale</Button>
+          <Button variant="secondary" onClick={() => { resetSale(); onBack(); }}>
+            Back to Floor
           </Button>
-          {error && <p className="field__error mt-2">{error}</p>}
-        </Card>
-      </>
+        </div>
+      </div>
     );
   }
 
-  // Build screen — two areas: Workers | Services
-  return (
-    <>
-      <header>
-        <p className="eyebrow">Checkout</p>
-        <div className="app-bar">
-          <h1 className="app-bar__title">
-            {step === "build" && "Build Sale"}
-            {step === "pay" && "Take Payment"}
-          </h1>
-          <Button variant="ghost" size="sm" onClick={onBack}>← Floor</Button>
-        </div>
-      </header>
+  // ── Start (pre-init) screen ──
+  if (!hasStarted) {
+    return (
+      <div className="checkout-start">
+        <span style={{ fontSize: "3rem" }}>🚶</span>
+        <h2 style={{ margin: 0, fontSize: "var(--text-xl)", fontWeight: "var(--font-bold)" }}>New Sale</h2>
+        <p className="text-muted text-sm" style={{ maxWidth: 320 }}>
+          Create a walk-in sale. Select a worker, add services, and take payment — all on one screen.
+        </p>
+        <Button size="lg" loading={loading} onClick={initSale}>
+          Start Sale
+        </Button>
+        <Button variant="ghost" size="sm" onClick={onBack}>← Back to Floor</Button>
+        {error && <p className="field__error">{error}</p>}
+      </div>
+    );
+  }
 
-      {/* Summary bar */}
-      <div className="checkout-total-bar mb-4">
-        <span className="checkout-total-bar__label">
-          {items.length} item{items.length !== 1 ? "s" : ""} · Sale Total
-        </span>
-        <span className="checkout-total-bar__amount">{formatMoney(total)}</span>
+  // ── Active workspace ──
+  return (
+    <div className="checkout-workspace">
+      {/* Top Bar */}
+      <div className="checkout-topbar">
+        <button className="checkout-topbar__back" onClick={onBack}>
+          ← Floor
+        </button>
+        <div className="checkout-topbar__customer">
+          👤 <strong>Walk-in</strong>
+        </div>
+        <div className="checkout-topbar__total">
+          <span className="checkout-topbar__total-label">Total</span>
+          <span className="checkout-topbar__total-amount">{formatMoney(total)}</span>
+        </div>
+        <Button
+          size="sm"
+          onClick={completeCheckout}
+          disabled={remaining > 0 || loading || items.length === 0}
+          loading={loading}
+        >
+          Complete
+        </Button>
       </div>
 
-      {step === "build" && (
-        <>
-          {/* Active worker indicator */}
-          {selectedWorker ? (
-            <div
-              style={{
-                padding: "var(--space-3)",
-                marginBottom: "var(--space-4)",
-                background: "var(--color-info-light, #e8f4fd)",
-                borderRadius: "var(--radius-md)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-              }}
-            >
-              <span>
-                👤 Active: <strong>{selectedWorker.displayName || selectedWorker.user?.name}</strong>
-                {" "}· {Math.round(selectedWorker.commissionRate * 100)}% commission
-              </span>
-              <Button size="sm" variant="ghost" onClick={() => setSelectedWorkerId(null)}>
-                Clear
-              </Button>
-            </div>
+      {error && (
+        <p className="field__error" style={{ marginBottom: "var(--space-2)", textAlign: "center" }}>
+          {error}
+        </p>
+      )}
+
+      {/* Four Columns */}
+      <div className="checkout-columns">
+        {/* Column 1: Worker List */}
+        <div className="checkout-column">
+          <p className="checkout-column__title">👥 Workers</p>
+          {workers.length === 0 ? (
+            <EmptyState icon="👤" title="No workers" description="Add workers in the Workers tab." />
           ) : (
-            <div
-              style={{
-                padding: "var(--space-3)",
-                marginBottom: "var(--space-4)",
-                background: "var(--color-warning-light, #fff8e1)",
-                borderRadius: "var(--radius-md)",
-                fontSize: "var(--text-sm)",
-                color: "var(--color-warning, #c79100)",
-              }}
-            >
-              ⚠️ Select a worker below before adding services.
+            <div className="checkout-worker-list">
+              {workers.map((w) => (
+                <div
+                  key={w.id}
+                  className={`checkout-worker-chip ${selectedWorkerId === w.id ? "checkout-worker-chip--selected" : ""}`}
+                  onClick={() => handleSelectWorker(w)}
+                >
+                  <span
+                    className="checkout-worker-chip__status-dot"
+                    style={{ background: statusDotColor(w.currentStatus) }}
+                  />
+                  <div className="checkout-worker-chip__info">
+                    <span className="checkout-worker-chip__name">
+                      {w.displayName || w.user?.name}
+                    </span>
+                    <span className="checkout-worker-chip__meta">
+                      {Math.round(w.commissionRate * 100)}% · <StatusPill status={w.currentStatus} />
+                    </span>
+                  </div>
+                </div>
+              ))}
             </div>
           )}
-          {error && <p className="field__error mb-3">{error}</p>}
+        </div>
 
-          <div className="grid">
-            {/* ── Workers Area ── */}
-            <Card padding="lg">
-              <div className="card__header">
-                <h2 className="card__title">👥 Workers</h2>
-                <Badge variant="info">{workers.length}</Badge>
+        {/* Column 2: Service Catalog */}
+        <div className="checkout-column">
+          <p className="checkout-column__title">💅 Services</p>
+          {services.length === 0 ? (
+            <EmptyState icon="💅" title="No services" description="Add services in the Services tab." />
+          ) : (
+            <>
+              <div className="checkout-services-tabs">
+                <Tabs
+                  tabs={categoryNames.map((c) => ({ key: c, label: c }))}
+                  activeKey={activeCategory}
+                  onChange={setActiveCategory}
+                />
               </div>
-              {workers.length === 0 ? (
-                <EmptyState icon="👤" title="No workers available" description="Add workers in the Workers tab first." />
-              ) : (
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: "var(--space-2)" }}>
-                  {workers.map((w) => (
-                    <div
-                      key={w.id}
-                      onClick={() => handleSelectWorker(w)}
-                      style={{
-                        cursor: "pointer",
-                        padding: "var(--space-3)",
-                        borderRadius: "var(--radius-md)",
-                        border: selectedWorkerId === w.id
-                          ? "2px solid var(--color-primary)"
-                          : "2px solid var(--color-border, #ddd)",
-                        background: selectedWorkerId === w.id
-                          ? "var(--color-primary-light, #e8f0fe)"
-                          : "var(--color-surface)",
-                        textAlign: "center",
-                        transition: "all 0.15s",
-                      }}
-                    >
-                      <div style={{ fontSize: "var(--text-lg)", marginBottom: "var(--space-1)" }}>
-                        {w.currentStatus === "available" ? "🟢" : w.currentStatus === "in_service" ? "🔵" : w.currentStatus === "on_break" ? "🟡" : "⚪"}
-                      </div>
-                      <div style={{ fontWeight: "var(--font-semibold)", fontSize: "var(--text-sm)", marginBottom: "var(--space-1)" }}>
-                        {w.displayName || w.user?.name}
-                      </div>
-                      <div style={{ fontSize: "var(--text-xs)", color: "var(--color-text-muted)" }}>
-                        {Math.round(w.commissionRate * 100)}%
-                      </div>
-                      <StatusPill status={w.currentStatus} />
-                    </div>
-                  ))}
-                </div>
-              )}
-            </Card>
+              <div className="checkout-services-grid">
+                {filteredServices.map((svc) => (
+                  <div
+                    key={svc.id}
+                    className="checkout-service-card"
+                    onClick={() => { void handleSelectService(svc); }}
+                  >
+                    <span className="checkout-service-card__name">{svc.name}</span>
+                    <span className="checkout-service-card__price">{formatMoney(svc.priceCents)}</span>
+                    <span className="checkout-service-card__meta">
+                      {svc.category?.name && <span>{svc.category.name}</span>}
+                      <span>{svc.durationMinutes}m</span>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
 
-            {/* ── Services Area ── */}
-            <Card padding="lg" className="wide">
-              <div className="card__header">
-                <h2 className="card__title">💅 Services</h2>
-                <div style={{ display: "flex", gap: "var(--space-2)" }}>
-                  {items.length > 0 && (
-                    <Button size="sm" variant="secondary" onClick={() => setStep("pay")}>
-                      Go to Payment →
-                    </Button>
-                  )}
-                </div>
-              </div>
-              {services.length === 0 ? (
-                <EmptyState icon="💅" title="No services available" description="Add services in the Services tab first." />
-              ) : (
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: "var(--space-2)" }}>
-                  {services.map((svc) => (
-                    <div
-                      key={svc.id}
-                      onClick={() => { void handleSelectService(svc); }}
-                      style={{
-                        cursor: "pointer",
-                        padding: "var(--space-3)",
-                        borderRadius: "var(--radius-md)",
-                        border: "2px solid var(--color-border, #ddd)",
-                        background: "var(--color-surface)",
-                        textAlign: "center",
-                        transition: "all 0.15s",
-                      }}
-                    >
-                      <div style={{ fontWeight: "var(--font-semibold)", fontSize: "var(--text-sm)", marginBottom: "var(--space-1)" }}>
-                        {svc.name}
-                      </div>
-                      <MoneyDisplay cents={svc.priceCents} className="money--sm" />
-                      <div style={{ fontSize: "var(--text-xs)", color: "var(--color-text-muted)", marginTop: "var(--space-1)" }}>
-                        {svc.category?.name ?? ""} · {svc.durationMinutes}m
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </Card>
-          </div>
-
-          {/* Items added so far */}
-          {items.length > 0 && (
-            <Card padding="lg" className="mt-4">
-              <div className="card__header">
-                <h2 className="card__title">Sale Items</h2>
-                <Badge variant="info">{items.length}</Badge>
-              </div>
-              <div className="checkout-section">
-                {items.map((item, idx) => (
-                  <div key={idx} style={{ fontSize: "var(--text-sm)", display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "var(--space-2) 0" }}>
-                    <div>
-                      <div style={{ fontWeight: "var(--font-semibold)" }}>{item.serviceName}</div>
-                      <div className="text-muted" style={{ fontSize: "var(--text-xs)" }}>
-                        {item.workerName} · {item.category}
-                      </div>
-                    </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)" }}>
-                      <span style={{ fontWeight: "var(--font-semibold)" }}>
-                        {formatMoney(item.priceCents - item.discountCents + item.tipCents)}
+        {/* Column 3: Sale Items + Totals */}
+        <div className="checkout-column">
+          <p className="checkout-column__title">📋 Sale Items</p>
+          {items.length === 0 ? (
+            <EmptyState icon="📋" title="No items" description="Select a worker, then tap services to add." />
+          ) : (
+            <div className="checkout-items-list">
+              {items.map((item, idx) => (
+                <div key={idx} className="checkout-sale-item">
+                  <div className="checkout-sale-item__info">
+                    <span className="checkout-sale-item__name">{item.serviceName}</span>
+                    <span className="checkout-sale-item__worker">
+                      {item.workerName} · {item.category}
+                    </span>
+                    <div className="checkout-sale-item__tip-row">
+                      <span style={{ fontSize: "var(--text-xs)", color: "var(--color-text-muted)" }}>💰 Tip:</span>
+                      <button
+                        className="checkout-sale-item__tip-btn"
+                        onClick={() => updateTip(idx, -100)}
+                      >
+                        −
+                      </button>
+                      <span className="checkout-sale-item__tip-amount">
+                        {formatMoney(item.tipCents)}
                       </span>
                       <button
-                        onClick={() => removeItem(idx)}
-                        style={{
-                          background: "none", border: "none", cursor: "pointer",
-                          color: "var(--color-danger)", fontSize: "var(--text-lg)",
-                          padding: 0, lineHeight: 1,
-                        }}
+                        className="checkout-sale-item__tip-btn"
+                        onClick={() => updateTip(idx, 100)}
                       >
-                        ✕
+                        +
                       </button>
                     </div>
                   </div>
-                ))}
-                <hr className="receipt__line" />
-                <div className="flex-between" style={{ fontWeight: "var(--font-bold)" }}>
-                  <span>Total</span>
-                  <span>{formatMoney(total)}</span>
+                  <div className="checkout-sale-item__right">
+                    <span className="checkout-sale-item__price">
+                      {formatMoney(item.priceCents + item.tipCents - item.discountCents)}
+                    </span>
+                    <button
+                      className="checkout-sale-item__remove"
+                      onClick={() => { void removeItem(idx); }}
+                    >
+                      ✕
+                    </button>
+                  </div>
                 </div>
-              </div>
-            </Card>
+              ))}
+            </div>
           )}
-        </>
-      )}
 
-      {/* ── Payment Step ── */}
-      {step === "pay" && (
-        <div className="grid">
-          <Card padding="lg" className="wide">
-            <div className="card__header">
-              <h2 className="card__title">💰 Take Payment</h2>
-              <Button size="sm" variant="secondary" onClick={() => setStep("build")}>
-                ← Back to Build
-              </Button>
+          {/* Totals pinned at bottom */}
+          <div className="checkout-totals">
+            <div className="checkout-totals__row">
+              <span className="checkout-totals__label">Subtotal</span>
+              <span className="checkout-totals__value">{formatMoney(subtotal)}</span>
             </div>
-            <div className="remaining-tracker mb-4">
-              {remaining > 0 ? (
-                <>Remaining: <span className="remaining-tracker__amount">{formatMoney(remaining)}</span></>
-              ) : (
-                <span className="remaining-tracker__done">✓ Fully Paid!</span>
-              )}
+            {discounts > 0 && (
+              <div className="checkout-totals__row">
+                <span className="checkout-totals__label">Discounts</span>
+                <span className="checkout-totals__value checkout-totals__value--discount">
+                  −{formatMoney(discounts)}
+                </span>
+              </div>
+            )}
+            <div className="checkout-totals__row">
+              <span className="checkout-totals__label">Tips</span>
+              <span className="checkout-totals__value checkout-totals__value--tips">
+                {formatMoney(tips)}
+              </span>
             </div>
-            <div className="payment-methods mb-4">
+            <div className="checkout-totals__row checkout-totals__row--main">
+              <span>Total</span>
+              <span>{formatMoney(total)}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Column 4: Payment */}
+        <div className="checkout-column">
+          <p className="checkout-column__title">💳 Payment</p>
+          <div className="checkout-payment-panel">
+            {/* Method selector */}
+            <div className="payment-methods">
               {[
                 { key: "cash", icon: "💵", label: "Cash" },
                 { key: "card", icon: "💳", label: "Card" },
@@ -1864,21 +2484,42 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
                 </button>
               ))}
             </div>
-            {remaining > 0 && (
-              <div className="mb-3">
-                <Button fullWidth variant="secondary" onClick={exactPayment} loading={loading}>
-                  Pay Exact Total — {formatMoney(remaining)}
-                </Button>
-              </div>
-            )}
-            <AmountInput label="Custom Amount" valueCents={amountCents} onChangeCents={setAmountCents} />
-            <div className="mt-2">
-              <Button fullWidth variant="ghost" onClick={addPayment} disabled={amountCents <= 0 || loading}>
-                Add Payment
-              </Button>
+
+            {/* Remaining */}
+            <div className="remaining-tracker">
+              {remaining > 0 ? (
+                <>Remaining: <span className="remaining-tracker__amount">{formatMoney(remaining)}</span></>
+              ) : (
+                <span className="remaining-tracker__done">✓ Fully Paid!</span>
+              )}
             </div>
+
+            {/* Exact payment button */}
+            {remaining > 0 && (
+              <Button fullWidth variant="secondary" onClick={exactPayment} loading={loading} size="sm">
+                Pay Exact — {formatMoney(remaining)}
+              </Button>
+            )}
+
+            {/* Custom amount */}
+            <AmountInput
+              label="Custom Amount"
+              valueCents={amountCents}
+              onChangeCents={setAmountCents}
+            />
+            <Button
+              fullWidth
+              variant="ghost"
+              size="sm"
+              onClick={addPayment}
+              disabled={amountCents <= 0 || loading}
+            >
+              Add Payment
+            </Button>
+
+            {/* Payment entries */}
             {payments.length > 0 && (
-              <div className="payment-entries mt-4">
+              <div className="payment-entries">
                 {payments.map((p, i) => (
                   <div key={i} className="payment-entry">
                     <span className="payment-entry__method">{methodLabel(p.method)}</span>
@@ -1888,43 +2529,10 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
                 ))}
               </div>
             )}
-            {error && <p className="field__error mt-2">{error}</p>}
-            <div className="flex-between mt-4">
-              <Button variant="secondary" onClick={() => setStep("build")}>← Back</Button>
-              <Button onClick={completeCheckout} disabled={remaining > 0 || loading} loading={loading}>
-                Complete Sale
-              </Button>
-            </div>
-          </Card>
-          <Card padding="lg">
-            <h2 className="card__title mb-2">Sale Summary</h2>
-            {items.length === 0 ? (
-              <p className="text-muted text-sm">No services added.</p>
-            ) : (
-              <div className="checkout-section">
-                {items.map((item, idx) => (
-                  <div key={idx} style={{ fontSize: "var(--text-sm)", display: "flex", justifyContent: "space-between", padding: "var(--space-1) 0" }}>
-                    <div>
-                      <div style={{ fontWeight: "var(--font-semibold)" }}>{item.serviceName}</div>
-                      <div className="text-muted" style={{ fontSize: "var(--text-xs)" }}>{item.workerName}</div>
-                    </div>
-                    <span style={{ fontWeight: "var(--font-semibold)" }}>
-                      {formatMoney(item.priceCents - item.discountCents + item.tipCents)}
-                    </span>
-                  </div>
-                ))}
-                <hr className="receipt__line" />
-                <div className="flex-between" style={{ fontWeight: "var(--font-bold)" }}>
-                  <span>Total</span><span>{formatMoney(total)}</span>
-                </div>
-                {paid > 0 && <div className="flex-between text-sm text-muted"><span>Paid</span><span>{formatMoney(paid)}</span></div>}
-                {remaining > 0 && <div className="flex-between text-sm" style={{ color: "var(--color-danger)" }}><span>Due</span><span>{formatMoney(remaining)}</span></div>}
-              </div>
-            )}
-          </Card>
+          </div>
         </div>
-      )}
-    </>
+      </div>
+    </div>
   );
 }
 
@@ -2646,20 +3254,19 @@ function WorkersScreen() {
    ════════════════════════════════════════ */
 
 function ReportsScreen() {
-  const [activeReport, setActiveReport] = useState("turns");
+  const [activeReport, setActiveReport] = useState("sales");
   const [startDate, setStartDate] = useState(() => {
-    const d = new Date();
-    d.setHours(0, 0, 0, 0);
-    return d.toISOString().slice(0, 10);
+    return toDateInputValue(new Date());
   });
   const [endDate, setEndDate] = useState(() => {
-    const d = new Date();
-    d.setDate(d.getDate() + 1);
-    d.setHours(0, 0, 0, 0);
-    return d.toISOString().slice(0, 10);
+    return toDateInputValue(new Date());
   });
+  const [selectedWorkerId, setSelectedWorkerId] = useState("");
+  const [reportWorkers, setReportWorkers] = useState<Worker[]>([]);
   const [loading, setLoading] = useState(false);
-  const [salesSummary, setSalesSummary] = useState<Record<string, number> | null>(null);
+  const [reportError, setReportError] = useState("");
+  const [salesSummary, setSalesSummary] = useState<SalesReportSummary | null>(null);
+  const [salesTickets, setSalesTickets] = useState<SalesReportTicket[]>([]);
   const [workerEarnings, setWorkerEarnings] = useState<{ workerId: string; name: string; services: number; netSalesCents: number; commissionCents: number; tipsCents: number; totalPayCents: number }[]>([]);
   const [turnDetails, setTurnDetails] = useState<TurnDetail[]>([]);
   const [eodData, setEodData] = useState<{
@@ -2673,46 +3280,71 @@ function ReportsScreen() {
     giftCardTotalCents: number;
     workerCommissionPayoutCents: number;
     businessShareCents: number;
+    totalPayCents?: number;
   } | null>(null);
 
   const reportParams = {
     start: startDate ? `${startDate}T00:00:00` : undefined,
-    end: endDate ? `${endDate}T00:00:00` : undefined,
+    end: endDate ? `${addDaysToDateInput(endDate, 1)}T00:00:00` : undefined,
+    workerId: selectedWorkerId || undefined,
+  };
+
+  const clearReportData = () => {
+    setSalesSummary(null);
+    setSalesTickets([]);
+    setWorkerEarnings([]);
+    setTurnDetails([]);
+    setEodData(null);
+  };
+
+  const setReportFailure = (error: unknown) => {
+    clearReportData();
+    setReportError(error instanceof Error ? error.message : "Failed to load report data.");
   };
 
   const loadSales = async () => {
     setLoading(true);
+    setReportError("");
+    setSalesSummary(null);
+    setSalesTickets([]);
     try {
       const data = await fetchSalesReport(reportParams);
       setSalesSummary(data.summary);
-    } catch { /* ignore */ }
+      setSalesTickets(data.sales);
+    } catch (error) { setReportFailure(error); }
     finally { setLoading(false); }
   };
 
   const loadWorkers = async () => {
     setLoading(true);
+    setReportError("");
+    setWorkerEarnings([]);
     try {
       const data = await fetchWorkerEarnings(reportParams);
       setWorkerEarnings(data.workers);
-    } catch { /* ignore */ }
+    } catch (error) { setReportFailure(error); }
     finally { setLoading(false); }
   };
 
   const loadTurns = async () => {
     setLoading(true);
+    setReportError("");
+    setTurnDetails([]);
     try {
       const data = await fetchTurnDetail(reportParams);
       setTurnDetails(data.turns);
-    } catch { /* ignore */ }
+    } catch (error) { setReportFailure(error); }
     finally { setLoading(false); }
   };
 
   const loadEod = async () => {
     setLoading(true);
+    setReportError("");
+    setEodData(null);
     try {
       const data = await fetchEndOfDayReport(reportParams);
       setEodData(data);
-    } catch { /* ignore */ }
+    } catch (error) { setReportFailure(error); }
     finally { setLoading(false); }
   };
 
@@ -2725,12 +3357,31 @@ function ReportsScreen() {
 
   useEffect(() => {
     refresh();
-  }, [activeReport, startDate, endDate]);
+  }, [activeReport, startDate, endDate, selectedWorkerId]);
+
+  useEffect(() => {
+    const loadReportWorkers = async () => {
+      try {
+        const data = await fetchWorkers();
+        setReportWorkers(data.filter((worker) => worker.active));
+      } catch {
+        setReportWorkers([]);
+      }
+    };
+    void loadReportWorkers();
+  }, []);
 
   const reportLabel = startDate && endDate
-    ? `${startDate} — ${endDate}`
+    ? startDate === endDate ? startDate : `${startDate} - ${endDate}`
     : "Today";
-
+  const selectedWorkerName = reportWorkers.find((worker) => worker.id === selectedWorkerId)?.displayName;
+  const filterDescription = selectedWorkerName
+    ? `${reportLabel} for ${selectedWorkerName}`
+    : reportLabel;
+  const workerOptions = [
+    { value: "", label: "All workers" },
+    ...reportWorkers.map((worker) => ({ value: worker.id, label: worker.displayName })),
+  ];
   return (
     <>
       <header>
@@ -2742,19 +3393,26 @@ function ReportsScreen() {
       </header>
 
       {/* Date range picker */}
-      <div style={{ display: "flex", gap: "var(--space-2)", marginBottom: "var(--space-4)", alignItems: "flex-end" }}>
+      <div style={{ display: "flex", gap: "var(--space-2)", marginBottom: "var(--space-4)", alignItems: "flex-end", flexWrap: "wrap" }}>
         <Input label="Start" type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
         <Input label="End" type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
+        <Select
+          label="Worker"
+          value={selectedWorkerId}
+          onChange={(e) => setSelectedWorkerId(e.target.value)}
+          options={workerOptions}
+          style={{ minWidth: "180px" }}
+        />
         <span style={{ paddingBottom: "var(--space-2)", fontSize: "var(--text-sm)", color: "var(--color-text-muted)" }}>
-          {reportLabel}
+          {filterDescription}
         </span>
       </div>
 
       <Tabs
         tabs={[
-          { key: "turns", label: "Turns" },
           { key: "sales", label: "Sales" },
           { key: "workers", label: "Workers" },
+          { key: "turns", label: "Turns" },
           { key: "eod", label: "End of Day" },
         ]}
         activeKey={activeReport}
@@ -2762,6 +3420,7 @@ function ReportsScreen() {
       />
 
       {loading && <p className="text-muted text-sm my-2">Loading...</p>}
+      {reportError && <p className="field__error my-2">{reportError}</p>}
 
       {/* ── Turn Detail Report ── */}
       {activeReport === "turns" && (
@@ -2806,15 +3465,73 @@ function ReportsScreen() {
       {activeReport === "sales" && salesSummary && (
         <>
           <div className="report-summary">
-            <StatCard label="Gross Sales" value={formatMoney(salesSummary.grossServiceSalesCents || 0)} />
-            <StatCard label="Discounts" value={formatMoney(salesSummary.discountTotalCents || 0)} />
-            <StatCard label="Refunds" value={formatMoney(salesSummary.refundTotalCents || 0)} />
-            <StatCard label="Net Sales" value={formatMoney(salesSummary.netServiceSalesCents || 0)} />
-            <StatCard label="Tips" value={formatMoney(salesSummary.tipTotalCents || 0)} />
-            <StatCard label="Cash" value={formatMoney(salesSummary.cashTotalCents || 0)} />
-            <StatCard label="Card" value={formatMoney(salesSummary.cardTotalCents || 0)} />
-            <StatCard label="Gift Card" value={formatMoney(salesSummary.giftCardTotalCents || 0)} />
+            <StatCard label="Service Total" value={formatMoney(salesSummary.netServiceSalesCents)} />
+            <StatCard label="Commission" value={formatMoney(salesSummary.workerCommissionPayoutCents)} />
+            <StatCard label="Tips" value={formatMoney(salesSummary.tipTotalCents)} />
+            <StatCard label="Pay" value={formatMoney(salesSummary.totalPayCents)} />
+            <StatCard label="Collected" value={formatMoney(salesSummary.totalCollectedCents)} />
           </div>
+          {salesTickets.length === 0 ? (
+            <EmptyState icon="📊" title="No paid tickets" description={`No paid ticket data found for ${filterDescription}.`} />
+          ) : (
+            <div className="report-ticket-list">
+              {salesTickets.map((ticket) => (
+                <Card key={ticket.id} padding="lg" className="report-ticket">
+                  <div className="card__header">
+                    <div>
+                      <h2 className="card__title">{ticket.customerName}</h2>
+                      <p className="text-muted text-sm">
+                        {ticket.completedAt ? new Date(ticket.completedAt).toLocaleString() : "Completed sale"} · {ticket.paymentMethods.map(methodLabel).join(", ") || "No approved payment"}
+                      </p>
+                    </div>
+                    <Badge variant="success">{formatMoney(ticket.totals.collectedCents)}</Badge>
+                  </div>
+                  <div className="table-wrap">
+                    <table className="report-table">
+                      <thead>
+                        <tr>
+                          <th>Service</th><th>Worker</th><th>Price</th><th>Discount</th><th>Paid</th><th>Commission</th><th>Tips</th><th>Pay</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {ticket.services.map((service) => (
+                          <tr key={service.id}>
+                            <td><strong>{service.serviceName}</strong></td>
+                            <td>{service.workerName}</td>
+                            <td>{formatMoney(service.priceCents)}</td>
+                            <td>{service.discountCents > 0 ? `-${formatMoney(service.discountCents)}` : "—"}</td>
+                            <td>{formatMoney(service.finalServiceCents)}</td>
+                            <td>{formatMoney(service.commissionCents)}</td>
+                            <td>{formatMoney(service.tipsCents)}</td>
+                            <td><strong>{formatMoney(service.payCents)}</strong></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                      <tfoot>
+                        <tr>
+                          <td colSpan={4}><strong>Ticket total</strong></td>
+                          <td><strong>{formatMoney(ticket.totals.serviceCents)}</strong></td>
+                          <td><strong>{formatMoney(ticket.totals.commissionCents)}</strong></td>
+                          <td><strong>{formatMoney(ticket.totals.tipsCents)}</strong></td>
+                          <td><strong>{formatMoney(ticket.totals.payCents)}</strong></td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                </Card>
+              ))}
+              <Card padding="lg" className="report-ticket-total">
+                <div className="report-ticket-total__grid">
+                  <span><strong>All tickets</strong></span>
+                  <span>Service {formatMoney(salesSummary.netServiceSalesCents)}</span>
+                  <span>Commission {formatMoney(salesSummary.workerCommissionPayoutCents)}</span>
+                  <span>Tips {formatMoney(salesSummary.tipTotalCents)}</span>
+                  <span>Pay {formatMoney(salesSummary.totalPayCents)}</span>
+                  <span>Collected {formatMoney(salesSummary.totalCollectedCents)}</span>
+                </div>
+              </Card>
+            </div>
+          )}
         </>
       )}
       {activeReport === "sales" && !salesSummary && !loading && (
@@ -3089,6 +3806,20 @@ function timeAgo(iso: string) {
   return `${hrs}h ago`;
 }
 
+function toDateInputValue(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function addDaysToDateInput(value: string, days: number) {
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(year, month - 1, day);
+  date.setDate(date.getDate() + days);
+  return toDateInputValue(date);
+}
+
 function methodLabel(method: string) {
   return ({ cash: "Cash", card: "Card", gift_card: "Gift Card" } as Record<string, string>)[method] ?? method;
 }
@@ -3139,20 +3870,20 @@ const CATEGORY_COLORS = [
    Mock Data
    ════════════════════════════════════════ */
 
-const MOCK_WORKERS_DASHBOARD: TurnDashboardWorker[] = [
-  { workerId: "w1", name: "Amy", status: "available", turnsTakenToday: 3, lastTurnEndedAt: "2026-05-26T13:20:00-05:00", activeTurn: null, salesTodayCents: 24000, tipsTodayCents: 4500, suggestionRank: 1, turns: [] },
-  { workerId: "w2", name: "Bella", status: "in_service", turnsTakenToday: 2, lastTurnEndedAt: null, activeTurn: { customerName: "Mary" }, salesTodayCents: 18000, tipsTodayCents: 3200, suggestionRank: null, turns: [] },
-  { workerId: "w3", name: "Coco", status: "available", turnsTakenToday: 1, lastTurnEndedAt: "2026-05-26T11:00:00-05:00", activeTurn: null, salesTodayCents: 8000, tipsTodayCents: 1000, suggestionRank: 2, turns: [] },
-  { workerId: "w4", name: "Daisy", status: "on_break", turnsTakenToday: 2, lastTurnEndedAt: "2026-05-26T12:00:00-05:00", activeTurn: null, salesTodayCents: 14000, tipsTodayCents: 2800, suggestionRank: null, turns: [] },
+export const MOCK_WORKERS_DASHBOARD: TurnDashboardWorker[] = [
+  { workerId: "w1", name: "Amy", status: "available", turnsTakenToday: 3, lastTurnEndedAt: "2026-05-26T13:20:00-05:00", activeTurn: null, salesTodayCents: 24000, tipsTodayCents: 4500, suggestionRank: 1, checkedIn: true, turns: [] },
+  { workerId: "w2", name: "Bella", status: "in_service", turnsTakenToday: 2, lastTurnEndedAt: null, activeTurn: { customerName: "Mary" }, salesTodayCents: 18000, tipsTodayCents: 3200, suggestionRank: null, checkedIn: true, turns: [] },
+  { workerId: "w3", name: "Coco", status: "available", turnsTakenToday: 1, lastTurnEndedAt: "2026-05-26T11:00:00-05:00", activeTurn: null, salesTodayCents: 8000, tipsTodayCents: 1000, suggestionRank: 2, checkedIn: false, turns: [] },
+  { workerId: "w4", name: "Daisy", status: "on_break", turnsTakenToday: 2, lastTurnEndedAt: "2026-05-26T12:00:00-05:00", activeTurn: null, salesTodayCents: 14000, tipsTodayCents: 2800, suggestionRank: null, checkedIn: false, turns: [] },
 ];
 
-const MOCK_CHECKINS: Checkin[] = [
+export const MOCK_CHECKINS: Checkin[] = [
   { id: "c1", status: "waiting", notes: "Full set acrylic", checkedInAt: new Date(Date.now() - 15 * 60000).toISOString(), customer: { name: "Sarah Johnson", phone: "555-0101" } },
   { id: "c2", status: "waiting", notes: "Gel pedicure", checkedInAt: new Date(Date.now() - 5 * 60000).toISOString(), customer: { name: "Kim Lee", phone: "555-0102" } },
   { id: "c3", status: "waiting", notes: "Walk-in manicure", checkedInAt: new Date(Date.now() - 2 * 60000).toISOString(), customer: { name: "Jessica M.", phone: "555-0103" } },
 ];
 
-const MOCK_CHECKOUT_READY: Checkin[] = [
+export const MOCK_CHECKOUT_READY: Checkin[] = [
   { id: "c4", status: "ready_for_checkout", notes: "Deluxe pedicure", checkedInAt: new Date(Date.now() - 90 * 60000).toISOString(), customer: { name: "Mary Tran", phone: "555-0104" } },
 ];
 

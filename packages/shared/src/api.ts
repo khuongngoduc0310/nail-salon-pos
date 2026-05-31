@@ -10,6 +10,7 @@ export type TurnDashboardWorker = {
   salesTodayCents: number;
   tipsTodayCents: number;
   suggestionRank: number | null;
+  checkedIn: boolean;
   turns: TurnDetailEntry[];
 };
 
@@ -83,6 +84,7 @@ export type CheckedInWorker = {
   workerId: string;
   name: string;
   checkedInAt: string;
+  checkedOutAt: string | null;
 };
 
 export type SalonSettings = {
@@ -130,6 +132,9 @@ export function fetchCheckedInWorkers(): Promise<CheckedInWorker[]> {
 }
 export function workerCheckIn(workerId: string): Promise<CheckedInWorker> {
   return fetchJson("/sessions/current/worker-checkin", { method: "POST", body: JSON.stringify({ workerId }) });
+}
+export function workerClockOut(workerId: string): Promise<CheckedInWorker> {
+  return fetchJson("/sessions/current/worker-clockout", { method: "POST", body: JSON.stringify({ workerId }) });
 }
 
 // Turns

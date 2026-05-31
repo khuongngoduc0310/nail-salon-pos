@@ -160,7 +160,7 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
         const item = requireRecord<SaleItemRecord>(
           await tx.saleItem.update({
             where: { id: itemId },
-            data: { status: "cancelled" },
+            data: { status: "voided" },
           }),
           "sale item not found"
         );

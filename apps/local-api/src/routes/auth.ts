@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { DbClient } from "../db.js";
-import { asObject, handleRouteError, requiredString } from "../http.js";
+import { asObject, getParams, handleRouteError, requiredString } from "../http.js";
 
 type AuthUser = {
   id: string;
@@ -29,6 +29,34 @@ function isAuthUser(value: unknown): value is AuthUser {
     (typeof user.pinHash === "string" || user.pinHash === null) &&
     (typeof user.passwordHash === "string" || user.passwordHash === null)
   );
+}
+
+/**
+ * Verify a Bearer token and return the userId it encodes.
+ * Returns null if the token is missing, malformed, or the user doesn't exist.
+ * Exported for use by other route modules that need inline auth checks.
+ */
+export async function verifyWorkerToken(db: DbClient, authHeader: string | undefined): Promise<string | null> {
+  if (!authHeader || !authHeader.startsWith("Bearer ")) return null;
+
+  try {
+    const token = authHeader.slice(7);
+    const decoded = Buffer.from(token, "base64").toString("utf-8");
+    const [userId, role] = decoded.split(":");
+
+    // Dev owner bypass in non-production
+    if (process.env.NODE_ENV !== "production" && userId === "dev-owner") return userId;
+
+    // Only workers and owners can use worker endpoints
+    if (role !== "worker" && role !== "owner") return null;
+
+    const user = await (db as any).user.findUnique({ where: { id: userId } });
+    if (!user || !user.active) return null;
+
+    return userId;
+  } catch {
+    return null;
+  }
 }
 
 export async function registerAuthRoutes(app: FastifyInstance, db: DbClient) {
@@ -81,6 +109,54 @@ export async function registerAuthRoutes(app: FastifyInstance, db: DbClient) {
       }
 
       return buildAuthResponse(user);
+    } catch (error) {
+      return handleRouteError(error, reply);
+    }
+  });
+
+  // Worker PIN-based login — used by the Worker PWA
+  app.post("/api/auth/worker-login", async (request, reply) => {
+    try {
+      const body = asObject(request.body);
+      const workerId = requiredString(body.workerId, "workerId");
+      const pin = requiredString(body.pin, "pin");
+
+      const worker = await (db as any).worker.findUnique({
+        where: { id: workerId, active: true },
+        include: { user: true },
+      });
+
+      if (!worker) {
+        return reply.code(401).send({ error: "Worker not found or inactive" });
+      }
+
+      const user = worker.user;
+      if (!isAuthUser(user)) {
+        return reply.code(401).send({ error: "Invalid credentials" });
+      }
+
+      const validPin = isValidPin(user, user.email ?? "", pin);
+
+      if (!validPin) {
+        return reply.code(401).send({ error: "Invalid PIN" });
+      }
+
+      const token = Buffer.from(`${user.id}:${user.role}`).toString("base64");
+
+      return {
+        token,
+        user: {
+          id: user.id,
+          name: user.name,
+          role: user.role,
+        },
+        worker: {
+          id: worker.id,
+          displayName: worker.displayName,
+          currentStatus: worker.currentStatus,
+          commissionRate: Number(worker.commissionRate),
+        },
+      };
     } catch (error) {
       return handleRouteError(error, reply);
     }
