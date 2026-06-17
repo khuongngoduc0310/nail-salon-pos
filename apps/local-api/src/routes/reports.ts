@@ -60,6 +60,8 @@ export async function registerReportRoutes(app: FastifyInstance, db: DbClient) {
         const netSales = paidItems.reduce((sum: number, i: any) => sum + getFinalServiceCents(i), 0);
         const commission = paidItems.reduce((sum: number, i: any) => sum + getCommissionCents(i), 0);
         const tips = paidItems.reduce((sum: number, i: any) => sum + cents(i.tipCents), 0);
+        const commissionRates = Array.from(new Set<number>(paidItems.map((item: any) => getCommissionRateSnapshot(item, w))))
+          .sort((a: number, b: number) => a - b);
 
         earnings.push({
           workerId: w.id,
@@ -68,6 +70,7 @@ export async function registerReportRoutes(app: FastifyInstance, db: DbClient) {
           netSalesCents: netSales,
           commissionCents: commission,
           commissionRate: Number(w.commissionRate || 0),
+          commissionRates,
           tipsCents: tips,
           totalPayCents: commission + tips,
         });
@@ -131,27 +134,59 @@ export async function registerReportRoutes(app: FastifyInstance, db: DbClient) {
   app.get("/api/reports/payments", async (request, reply) => {
     try {
       const query = getQuery(request);
-      const { start, end } = parseReportFilters(query);
+      const { start, end, workerId, paymentMethod } = parseReportFilters(query);
 
       const payments = await (db as any).payment.findMany({
         where: {
           createdAt: buildDateRange(start, end),
+          ...(paymentMethod ? { method: paymentMethod } : {}),
+          ...(workerId ? { sale: { items: { some: { workerId } } } } : {}),
         },
+        include: { sale: { include: { customer: true } } },
+        orderBy: { createdAt: "desc" },
       });
 
-      const byMethod: Record<string, number> = {};
+      const totals = {
+        cashTotalCents: 0,
+        cardTotalCents: 0,
+        giftCardTotalCents: 0,
+        otherTotalCents: 0,
+        totalApprovedCents: 0,
+      };
+      const byProvider: Record<string, Record<string, number>> = {};
       for (const p of payments) {
-        if (p.status === "approved") {
-          byMethod[p.method] = (byMethod[p.method] || 0) + (p.amountCents || 0);
+        const amountCents = cents(p.amountCents);
+        if (p.status !== "approved") continue;
+
+        if (p.method === "cash") totals.cashTotalCents += amountCents;
+        else if (p.method === "card") totals.cardTotalCents += amountCents;
+        else if (p.method === "gift_card") totals.giftCardTotalCents += amountCents;
+        else totals.otherTotalCents += amountCents;
+        totals.totalApprovedCents += amountCents;
+
+        if (p.provider) {
+          byProvider[p.provider] = byProvider[p.provider] ?? {};
+          byProvider[p.provider][p.status] = (byProvider[p.provider][p.status] ?? 0) + amountCents;
         }
       }
 
       return {
-        cashTotalCents: byMethod.cash || 0,
-        cardTotalCents: byMethod.card || 0,
-        giftCardTotalCents: byMethod.gift_card || 0,
-        otherTotalCents: byMethod.other || 0,
-        byProvider: {},
+        summary: {
+          ...totals,
+          byProvider,
+        },
+        payments: payments.map((payment: any) => ({
+          id: payment.id,
+          saleId: payment.saleId,
+          customerName: payment.sale?.customer?.name ?? "Walk-in",
+          method: payment.method,
+          provider: payment.provider ?? null,
+          providerPaymentId: payment.providerPaymentId ?? null,
+          amountCents: cents(payment.amountCents),
+          tipCents: cents(payment.tipCents),
+          status: payment.status,
+          createdAt: payment.createdAt,
+        })),
       };
     } catch (error) {
       return handleRouteError(error, reply);
@@ -162,15 +197,34 @@ export async function registerReportRoutes(app: FastifyInstance, db: DbClient) {
   app.get("/api/reports/refunds", async (request, reply) => {
     try {
       const query = getQuery(request);
-      const { start, end } = parseReportFilters(query);
+      const { start, end, workerId } = parseReportFilters(query);
 
       const refunds = await (db as any).refund.findMany({
-        where: { createdAt: buildDateRange(start, end) },
-        include: { sale: true, payment: true },
+        where: {
+          createdAt: buildDateRange(start, end),
+          ...(workerId ? { sale: { items: { some: { workerId } } } } : {}),
+        },
+        include: { sale: { include: { customer: true } }, payment: true },
         orderBy: { createdAt: "desc" },
       });
 
-      return { refunds };
+      return {
+        summary: {
+          refundTotalCents: refunds.reduce((sum: number, refund: any) => sum + cents(refund.amountCents), 0),
+          refundCount: refunds.length,
+        },
+        refunds: refunds.map((refund: any) => ({
+          id: refund.id,
+          saleId: refund.saleId,
+          paymentId: refund.paymentId ?? null,
+          customerName: refund.sale?.customer?.name ?? "Walk-in",
+          amountCents: cents(refund.amountCents),
+          reason: refund.reason ?? null,
+          approvedByUserId: refund.approvedByUserId ?? null,
+          paymentMethod: refund.payment?.method ?? null,
+          createdAt: refund.createdAt,
+        })),
+      };
     } catch (error) {
       return handleRouteError(error, reply);
     }
@@ -180,15 +234,36 @@ export async function registerReportRoutes(app: FastifyInstance, db: DbClient) {
   app.get("/api/reports/discounts", async (request, reply) => {
     try {
       const query = getQuery(request);
-      const { start, end } = parseReportFilters(query);
+      const { start, end, workerId } = parseReportFilters(query);
 
       const discounts = await (db as any).discount.findMany({
-        where: { createdAt: buildDateRange(start, end) },
-        include: { sale: true },
+        where: {
+          createdAt: buildDateRange(start, end),
+          ...(workerId ? { sale: { items: { some: { workerId } } } } : {}),
+        },
+        include: { sale: { include: { customer: true } }, saleItem: true },
         orderBy: { createdAt: "desc" },
       });
 
-      return { discounts };
+      return {
+        summary: {
+          discountTotalCents: discounts.reduce((sum: number, discount: any) => sum + cents(discount.amountCents), 0),
+          discountCount: discounts.length,
+        },
+        discounts: discounts.map((discount: any) => ({
+          id: discount.id,
+          saleId: discount.saleId,
+          saleItemId: discount.saleItemId ?? null,
+          customerName: discount.sale?.customer?.name ?? "Walk-in",
+          serviceName: discount.saleItem?.serviceNameSnapshot ?? null,
+          type: discount.type,
+          amountCents: cents(discount.amountCents),
+          percent: discount.percent ?? null,
+          reason: discount.reason ?? null,
+          approvedByUserId: discount.approvedByUserId ?? null,
+          createdAt: discount.createdAt,
+        })),
+      };
     } catch (error) {
       return handleRouteError(error, reply);
     }
@@ -448,6 +523,11 @@ function getCommissionCents(item: any) {
 
   const rate = Number(item.commissionRateSnapshot ?? 0);
   return Number.isFinite(rate) ? Math.round(getFinalServiceCents(item) * rate) : 0;
+}
+
+function getCommissionRateSnapshot(item: any, worker: any) {
+  const rate = Number(item.commissionRateSnapshot ?? worker.commissionRate ?? 0);
+  return Number.isFinite(rate) ? rate : 0;
 }
 
 function computeSalesSummary(sales: any[]) {

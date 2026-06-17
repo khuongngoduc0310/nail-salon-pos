@@ -30,6 +30,8 @@ Read these before making product or architecture changes:
 
 If implementation and docs conflict, surface the mismatch and make the smallest defensible change. Do not silently redefine business rules.
 
+When an approved code change intentionally changes documented behavior, architecture, API contracts, database schema, workflows, or test expectations, update the corresponding source-of-truth document in the same task so docs and implementation stay aligned.
+
 ## Non-Negotiable Business Rules
 
 - Never store full card number, CVV, PIN, magstripe data, raw EMV data, or other sensitive card data.
@@ -37,6 +39,7 @@ If implementation and docs conflict, surface the mismatch and make the smallest 
 - POS owns services, workers, turns, sales, reports, and receipts. Clover owns card processing only.
 - Worker commission rates must be snapshotted at checkout time.
 - Tips belong 100% to the worker.
+- Do not determine or prefill tips when adding sale items in checkout; Clover/payment-terminal tip flow determines any tip added after the sale is sent for payment.
 - Owner decides worker assignment; the POS may suggest but must not silently assign.
 - Turn count rules belong in shared domain logic and must stay consistent between API and UI.
 - Services are not inventory.

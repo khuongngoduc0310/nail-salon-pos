@@ -2,11 +2,13 @@ import type { FastifyInstance } from "fastify";
 import type { DbClient } from "../db.js";
 import { broadcast } from "../ws/events.js";
 import { verifyWorkerToken } from "./auth.js";
+import { hashPin, parseOptionalWorkerPin, parseRequiredWorkerPin } from "./pin.js";
 import {
   asObject,
   getParams,
   getQuery,
   handleRouteError,
+  HttpError,
   optionalBoolean,
   optionalInteger,
   optionalNumber,
@@ -32,6 +34,7 @@ export async function registerPeopleRoutes(app: FastifyInstance, db: DbClient) {
   app.post("/api/workers", async (request, reply) => {
     try {
       const body = asObject(request.body);
+      const pin = parseRequiredWorkerPin(body.pin);
       const worker = await db.$transaction(async (tx) => {
         const user = await tx.user.create({
           data: {
@@ -39,7 +42,7 @@ export async function registerPeopleRoutes(app: FastifyInstance, db: DbClient) {
             email: optionalString(body.email, "email"),
             phone: optionalString(body.phone, "phone"),
             role: "worker",
-            pinHash: optionalString(body.pinHash, "pinHash") ?? "dev-pin-placeholder",
+            pinHash: hashPin(pin),
           },
         });
         const userId = getRecordId(user);
@@ -66,15 +69,36 @@ export async function registerPeopleRoutes(app: FastifyInstance, db: DbClient) {
     try {
       const body = asObject(request.body);
       const params = getParams(request);
+      const workerId = requiredString(params.id, "id");
+      const pin = parseOptionalWorkerPin(body.pin);
+      const workerData = compact({
+        displayName: optionalString(body.displayName, "displayName"),
+        commissionRate: optionalNumber(body.commissionRate, "commissionRate"),
+        active: optionalBoolean(body.active, "active"),
+        sortOrder: optionalInteger(body.sortOrder, "sortOrder"),
+      });
 
-      return await db.worker.update({
-        where: { id: requiredString(params.id, "id") },
-        data: compact({
-          displayName: optionalString(body.displayName, "displayName"),
-          commissionRate: optionalNumber(body.commissionRate, "commissionRate"),
-          active: optionalBoolean(body.active, "active"),
-          sortOrder: optionalInteger(body.sortOrder, "sortOrder"),
-        }),
+      return await db.$transaction(async (tx) => {
+        const worker =
+          Object.keys(workerData).length > 0
+            ? await tx.worker.update({
+                where: { id: workerId },
+                data: workerData,
+              })
+            : await tx.worker.findUnique({ where: { id: workerId } });
+
+        if (!worker) {
+          throw new HttpError(404, "Worker not found");
+        }
+
+        if (pin) {
+          await tx.user.update({
+            where: { id: getWorkerUserId(worker) },
+            data: { pinHash: hashPin(pin) },
+          });
+        }
+
+        return worker;
       });
     } catch (error) {
       return handleRouteError(error, reply);
@@ -173,4 +197,12 @@ function getRecordId(record: unknown): string {
 
 function compact(input: Record<string, unknown>) {
   return Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined));
+}
+
+function getWorkerUserId(worker: unknown): string {
+  if (!worker || typeof worker !== "object" || !("userId" in worker) || typeof worker.userId !== "string") {
+    throw new Error("worker record did not include a user id");
+  }
+
+  return worker.userId;
 }

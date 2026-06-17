@@ -30,7 +30,9 @@ async function main() {
   for (const worker of workers) {
     const user = await prisma.user.upsert({
       where: { email: worker.email },
-      update: {},
+      update: {
+        pinHash: "dev-pin-placeholder",
+      },
       create: {
         name: worker.name,
         email: worker.email,

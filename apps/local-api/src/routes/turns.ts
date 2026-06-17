@@ -15,6 +15,7 @@ type WorkerRecord = {
   id: string;
   displayName: string;
   currentStatus: WorkerStatus;
+  checkedIn?: boolean;
   turns?: TurnRecord[];
   saleItems?: SaleItemRecord[];
 };
@@ -83,7 +84,12 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
 
   app.post("/api/turns/suggest", async (_request, reply) => {
     try {
-      const workers = await loadDashboardWorkers(db);
+      const currentSession = await getCurrentSession(db);
+      if (!currentSession) {
+        return { workers: [] };
+      }
+
+      const workers = await loadDashboardWorkers(db, currentSession.id);
       return { workers: rankSuggestedWorkers(workers.map(toRankingInput)) };
     } catch (error) {
       return handleRouteError(error, reply);
@@ -361,6 +367,7 @@ function toRankingInput(worker: WorkerRecord): WorkerRankingInput {
     lastTurnEndedAt: getLastTurnEndedAt(worker.turns ?? []),
     salesTodayCents: getSalesTodayCents(worker.saleItems ?? []),
     activeTurn: getActiveTurn(worker.turns ?? []),
+    checkedIn: worker.checkedIn,
   };
 }
 

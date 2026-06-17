@@ -1,9 +1,18 @@
 {
   "name": "Nail Salon Worker",
   "short_name": "Salon Worker",
+  "description": "Worker dashboard for turns, appointments, and daily earnings.",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#f7f8f5",
   "theme_color": "#2f5f57",
-  "icons": []
+  "icons": [
+    {
+      "src": "/worker-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
 }

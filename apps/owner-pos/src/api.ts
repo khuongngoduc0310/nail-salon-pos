@@ -304,6 +304,7 @@ export type ReportParams = {
   start?: string;
   end?: string;
   workerId?: string;
+  paymentMethod?: string;
 };
 
 export type TurnDetail = {
@@ -371,6 +372,66 @@ export type SalesReportSummary = {
   totalCollectedCents: number;
 };
 
+export type WorkerEarningsRow = {
+  workerId: string;
+  name: string;
+  services: number;
+  netSalesCents: number;
+  commissionCents: number;
+  commissionRate: number;
+  commissionRates: number[];
+  tipsCents: number;
+  totalPayCents: number;
+};
+
+export type PaymentReportRow = {
+  id: string;
+  saleId: string;
+  customerName: string;
+  method: string;
+  provider: string | null;
+  providerPaymentId: string | null;
+  amountCents: number;
+  tipCents: number;
+  status: string;
+  createdAt: string;
+};
+
+export type PaymentReportSummary = {
+  cashTotalCents: number;
+  cardTotalCents: number;
+  giftCardTotalCents: number;
+  otherTotalCents: number;
+  totalApprovedCents: number;
+  byProvider: Record<string, Record<string, number>>;
+};
+
+export type RefundReportRow = {
+  id: string;
+  saleId: string;
+  paymentId: string | null;
+  customerName: string;
+  amountCents: number;
+  reason: string | null;
+  approvedByUserId: string | null;
+  paymentMethod: string | null;
+  createdAt: string;
+};
+
+export type DiscountReportRow = {
+  id: string;
+  saleId: string;
+  saleItemId: string | null;
+  customerName: string;
+  serviceName: string | null;
+  type: string;
+  amountCents: number;
+  percent: number | string | null;
+  reason: string | null;
+  approvedByUserId: string | null;
+  createdAt: string;
+};
+
 export async function fetchSalesReport(params?: ReportParams): Promise<{
   summary: SalesReportSummary;
   sales: SalesReportTicket[];
@@ -380,7 +441,7 @@ export async function fetchSalesReport(params?: ReportParams): Promise<{
 }
 
 export async function fetchWorkerEarnings(params?: ReportParams): Promise<{
-  workers: { workerId: string; name: string; services: number; netSalesCents: number; commissionCents: number; tipsCents: number; totalPayCents: number }[];
+  workers: WorkerEarningsRow[];
 }> {
   const query = buildQuery(params);
   return fetchJson(`/reports/workers${query}`);
@@ -403,19 +464,46 @@ export async function fetchEndOfDayReport(params?: ReportParams): Promise<{
   cardTotalCents: number;
   giftCardTotalCents: number;
   workerCommissionPayoutCents: number;
+  workerTipsPayoutCents: number;
   businessShareCents: number;
+  totalPayCents: number;
   totalCollectedCents: number;
 }> {
   const query = buildQuery(params);
   return fetchJson(`/reports/end-of-day${query}`);
 }
 
+export async function fetchPaymentReport(params?: ReportParams): Promise<{
+  summary: PaymentReportSummary;
+  payments: PaymentReportRow[];
+}> {
+  const query = buildQuery(params);
+  return fetchJson(`/reports/payments${query}`);
+}
+
+export async function fetchRefundReport(params?: ReportParams): Promise<{
+  summary: { refundTotalCents: number; refundCount: number };
+  refunds: RefundReportRow[];
+}> {
+  const query = buildQuery(params);
+  return fetchJson(`/reports/refunds${query}`);
+}
+
+export async function fetchDiscountReport(params?: ReportParams): Promise<{
+  summary: { discountTotalCents: number; discountCount: number };
+  discounts: DiscountReportRow[];
+}> {
+  const query = buildQuery(params);
+  return fetchJson(`/reports/discounts${query}`);
+}
+
 function buildQuery(params?: ReportParams): string {
-  if (!params || (!params.start && !params.end && !params.workerId)) return "";
+  if (!params || (!params.start && !params.end && !params.workerId && !params.paymentMethod)) return "";
   const q = new URLSearchParams();
   if (params.start) q.set("start", params.start);
   if (params.end) q.set("end", params.end);
   if (params.workerId) q.set("workerId", params.workerId);
+  if (params.paymentMethod) q.set("paymentMethod", params.paymentMethod);
   return `?${q.toString()}`;
 }
 
@@ -426,10 +514,10 @@ function buildQuery(params?: ReportParams): string {
 export async function fetchWorkers(): Promise<Worker[]> {
   return fetchJson("/workers");
 }
-export async function createWorker(data: { name: string; displayName?: string; email?: string; phone?: string; commissionRate: number }): Promise<Worker> {
+export async function createWorker(data: { name: string; displayName?: string; email?: string; phone?: string; commissionRate: number; pin?: string }): Promise<Worker> {
   return fetchJson("/workers", { method: "POST", body: JSON.stringify(data) });
 }
-export async function updateWorker(id: string, data: { displayName?: string; commissionRate?: number; active?: boolean; sortOrder?: number }): Promise<Worker> {
+export async function updateWorker(id: string, data: { displayName?: string; commissionRate?: number; active?: boolean; sortOrder?: number; pin?: string }): Promise<Worker> {
   return fetchJson(`/workers/${id}`, { method: "PATCH", body: JSON.stringify(data) });
 }
 export async function updateWorkerStatus(id: string, status: string): Promise<Worker> {
@@ -443,7 +531,7 @@ export async function updateWorkerStatus(id: string, status: string): Promise<Wo
 export async function createSale(data: { customerId?: string; checkinId?: string }): Promise<{ id: string }> {
   return fetchJson("/sales", { method: "POST", body: JSON.stringify(data) });
 }
-export async function addSaleItem(saleId: string, data: { serviceId: string; workerId: string; priceCents?: number; discountCents?: number; tipCents?: number }): Promise<{ saleItem: Record<string, unknown>; sale: Record<string, unknown> }> {
+export async function addSaleItem(saleId: string, data: { serviceId?: string; workerId: string; serviceName?: string; categoryName?: string; priceCents?: number; discountCents?: number }): Promise<{ saleItem: Record<string, unknown>; sale: Record<string, unknown> }> {
   return fetchJson(`/sales/${saleId}/items`, { method: "POST", body: JSON.stringify(data) });
 }
 export async function removeSaleItem(saleId: string, itemId: string): Promise<unknown> {
@@ -455,8 +543,73 @@ export async function addCashPayment(saleId: string, data: { amountCents: number
 export async function addGiftCardPayment(saleId: string, data: { amountCents: number }): Promise<{ payment: Record<string, unknown>; sale: Record<string, unknown> }> {
   return fetchJson(`/sales/${saleId}/payments/gift-card`, { method: "POST", body: JSON.stringify(data) });
 }
-export async function addCardPayment(saleId: string, data: { amountCents: number; tipCents?: number; idempotencyKey: string }): Promise<{ payment: Record<string, unknown>; sale: Record<string, unknown>; terminalStatus: string }> {
-  return fetchJson(`/sales/${saleId}/payments/card/start`, { method: "POST", body: JSON.stringify(data) });
+export async function addCardPayment(saleId: string, data: { amountCents: number; idempotencyKey: string }): Promise<{ payment: Record<string, unknown>; sale: Record<string, unknown>; terminalStatus: string }> {
+  return fetchJson(`/sales/${saleId}/payments/card`, { method: "POST", body: JSON.stringify(data) });
+}
+
+export async function reconcileCardPayment(paymentId: string): Promise<{ payment: Record<string, unknown>; sale?: Record<string, unknown> | null; terminalStatus: string }> {
+  return fetchJson(`/payments/${paymentId}/reconcile`, { method: "POST" });
+}
+export type TerminalStatus = {
+  connected: boolean;
+  provider: "mock" | "clover";
+  message?: string;
+  pairingRequired?: boolean;
+  pairingCode?: string;
+};
+
+export type TerminalConfig = {
+  transport: "mock" | "rest-local" | "usb-sidecar" | "ws-lan";
+  deviceBaseUrl?: string;
+  deviceId?: string;
+  posId?: string;
+  usbSidecarUrl?: string;
+  wsUrl?: string;
+  wsHost?: string;
+  wsPort?: number;
+  wsPath?: string;
+  wsSecure?: boolean;
+  wsTimeoutMs?: number;
+  remoteApplicationId?: string;
+  posName?: string;
+  serialNumber?: string;
+  accessTokenConfigured?: boolean;
+  authTokenConfigured?: boolean;
+  accessTokenPreview?: string;
+  authTokenPreview?: string;
+};
+
+export type TerminalConfigUpdate = Partial<TerminalConfig> & {
+  accessToken?: string;
+  authToken?: string;
+};
+
+export async function fetchTerminalConfig(): Promise<TerminalConfig> {
+  return fetchJson("/terminal/config");
+}
+
+export async function updateTerminalConfig(data: TerminalConfigUpdate): Promise<{ config: TerminalConfig; status: TerminalStatus }> {
+  return fetchJson("/terminal/config", { method: "PATCH", body: JSON.stringify(data) });
+}
+
+export async function fetchTerminalStatus(): Promise<TerminalStatus> {
+  return fetchJson("/terminal/status");
+}
+
+export async function startTerminalPairing(): Promise<TerminalStatus> {
+  return fetchJson("/terminal/pair/start", { method: "POST" });
+}
+
+export async function fetchTerminalPairStatus(): Promise<TerminalStatus> {
+  return fetchJson("/terminal/pair/status");
+}
+
+export async function confirmTerminalPairing(pairingCode: string): Promise<TerminalStatus> {
+  return fetchJson("/terminal/pair/confirm", { method: "POST", body: JSON.stringify({ pairingCode }) });
+}
+
+export async function allocateCardTip(saleId: string, data: { paymentId: string; splitMode: "even_workers" | "service_amount_percentage" }): Promise<{ saleItems: Record<string, unknown>[]; sale: Record<string, unknown> }> {
+  return fetchJson(`/sales/${saleId}/tips/allocate`, { method: "POST", body: JSON.stringify(data) });
 }
 export async function completeSale(saleId: string): Promise<{ sale: { id: string; totalCents: number; amountPaidCents: number }; changeDueCents: number }> {
   return fetchJson(`/sales/${saleId}/complete`, { method: "POST" });

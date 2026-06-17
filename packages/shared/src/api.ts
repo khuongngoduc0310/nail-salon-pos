@@ -194,7 +194,7 @@ export function fetchServiceCategories(): Promise<ServiceCategory[]> {
 export function createSale(data: { customerId?: string; checkinId?: string }): Promise<{ id: string }> {
   return fetchJson("/sales", { method: "POST", body: JSON.stringify(data) });
 }
-export function addSaleItem(saleId: string, data: { serviceId: string; workerId: string }): Promise<unknown> {
+export function addSaleItem(saleId: string, data: { serviceId?: string; workerId: string; serviceName?: string; categoryName?: string; priceCents?: number; discountCents?: number }): Promise<unknown> {
   return fetchJson(`/sales/${saleId}/items`, { method: "POST", body: JSON.stringify(data) });
 }
 export function completeSale(saleId: string): Promise<{ sale: { id: string }; changeDueCents: number }> {

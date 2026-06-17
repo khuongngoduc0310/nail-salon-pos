@@ -22,6 +22,13 @@ import {
   addCashPayment,
   addGiftCardPayment,
   addCardPayment,
+  fetchTerminalConfig,
+  updateTerminalConfig,
+  fetchTerminalStatus,
+  startTerminalPairing,
+  fetchTerminalPairStatus,
+  confirmTerminalPairing,
+  allocateCardTip,
   completeSale,
   fetchCurrentSession,
   openSession,
@@ -38,6 +45,9 @@ import {
   fetchWorkerEarnings,
   fetchTurnDetail,
   fetchEndOfDayReport,
+  fetchPaymentReport,
+  fetchRefundReport,
+  fetchDiscountReport,
   verifyOwnerPin,
   type Checkin,
   type TurnDashboardWorker,
@@ -48,6 +58,13 @@ import {
   type TurnDetail,
   type SalesReportSummary,
   type SalesReportTicket,
+  type WorkerEarningsRow,
+  type PaymentReportSummary,
+  type PaymentReportRow,
+  type RefundReportRow,
+  type DiscountReportRow,
+  type TerminalConfig,
+  type TerminalStatus,
 } from "./api.js";
 import {
   AmountInput,
@@ -64,6 +81,8 @@ import {
   StatusPill,
   Tabs,
 } from "./components.js";
+import { buildWorkerReportTarget, type WorkerReportKey, type WorkerReportTarget } from "./reportTarget.js";
+import { buildWorkerSavePayload } from "./workerForm.js";
 import "./styles.css";
 
 /* ════════════════════════════════════════
@@ -72,7 +91,6 @@ import "./styles.css";
 
 type View =
   | "dashboard"
-  | "assign"
   | "checkout"
   | "services"
   | "workers"
@@ -81,7 +99,26 @@ type View =
 type PaymentEntry = {
   method: string;
   amountCents: number;
+  tipCents?: number;
 };
+
+type CheckoutDraft = {
+  saleId: string | null;
+  items: CheckoutItem[];
+  payments: PaymentEntry[];
+  selectedWorkerId: string | null;
+  amountCents: number;
+  changeCents: number;
+  hasStarted: boolean;
+  activeCategory: string;
+  activeMethod: string;
+  pendingTipAllocation: { paymentId: string; tipCents: number } | null;
+  mode: CheckoutMode;
+  savedAt: number;
+};
+
+const CHECKOUT_DRAFT_STORAGE_KEY = "nail.ownerPos.checkoutDraft.v1";
+const CHECKOUT_DRAFT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 /* ════════════════════════════════════════
    App
@@ -89,6 +126,7 @@ type PaymentEntry = {
 
 function App() {
   const [view, setView] = useState<View>("dashboard");
+  const [reportTarget, setReportTarget] = useState<WorkerReportTarget | null>(null);
   const [secureRequest, setSecureRequest] = useState<{
     title: string;
     description: string;
@@ -100,16 +138,26 @@ function App() {
   };
 
   const openView = (nextView: View) => {
+    const showView = () => {
+      if (nextView === "reports") setReportTarget(null);
+      setView(nextView);
+    };
+
     if (isSecureView(nextView)) {
       requestOwnerPin(
         "Owner PIN Required",
         `Enter owner PIN to open ${viewLabel(nextView)}.`,
-        () => setView(nextView)
+        showView
       );
       return;
     }
 
-    setView(nextView);
+    showView();
+  };
+
+  const openReportsForWorker = (workerId: string, report?: WorkerReportKey) => {
+    setReportTarget(buildWorkerReportTarget(workerId, report));
+    setView("reports");
   };
 
   return (
@@ -121,16 +169,14 @@ function App() {
             requestOwnerPin={requestOwnerPin}
           />
         )}
-        {view === "assign" && <AssignCustomersScreen />}
         {view === "checkout" && <CheckoutScreen onBack={() => setView("dashboard")} />}
         {view === "services" && <ServicesScreen />}
-        {view === "workers" && <WorkersScreen />}
-        {view === "reports" && <ReportsScreen />}
+        {view === "workers" && <WorkersScreen onOpenReportsForWorker={openReportsForWorker} />}
+        {view === "reports" && <ReportsScreen initialReport={reportTarget?.report} initialWorkerId={reportTarget?.workerId} />}
       </main>
       <BottomNav
         items={[
           { icon: "🏠", label: "Floor", active: view === "dashboard", onClick: () => openView("dashboard") },
-          { icon: "📋", label: "Assign", active: view === "assign", onClick: () => openView("assign") },
           { icon: "💳", label: "Checkout", active: view === "checkout", onClick: () => openView("checkout") },
           { icon: "💅", label: "Services", active: view === "services", onClick: () => openView("services") },
           { icon: "👥", label: "Workers", active: view === "workers", onClick: () => openView("workers") },
@@ -164,7 +210,6 @@ function viewLabel(view: View) {
   return (
     {
       dashboard: "Floor",
-      assign: "Assign",
       checkout: "Checkout",
       services: "Services",
       workers: "Workers",
@@ -263,7 +308,9 @@ function Dashboard({
   const [closeSummary, setCloseSummary] = useState<Record<string, number> | null>(null);
   const [checkedInWorkers, setCheckedInWorkers] = useState<CheckedInWorker[]>([]);
   const [apiOffline, setApiOffline] = useState(false);
-  const [showWorkerCheckIn, setShowWorkerCheckIn] = useState(false);
+  const [workerClockModalOpen, setWorkerClockModalOpen] = useState(false);
+  const [clockActionWorkerId, setClockActionWorkerId] = useState<string | null>(null);
+  const [clockActionError, setClockActionError] = useState("");
   const [showTurnMatrix, setShowTurnMatrix] = useState(false);
   const [now, setNow] = useState(() => new Date());
 
@@ -355,33 +402,23 @@ function Dashboard({
   const handleWorkerClockToggle = async (workerId: string) => {
     const existing = checkedInWorkers.find((c) => c.workerId === workerId);
     if (existing && !existing.checkedOutAt) {
-      try {
-        const w = await workerClockOut(workerId);
-        setCheckedInWorkers((prev) => prev.map((c) => (c.workerId === workerId ? w : c)));
-        await refreshFloor();
-      } catch (error) {
-        alert(error instanceof Error ? error.message : "Failed to clock out worker");
-      }
-    } else {
-      try {
-        const w = await workerCheckIn(workerId);
-        setCheckedInWorkers((prev) => {
-          const filtered = prev.filter((c) => c.workerId !== workerId);
-          return [...filtered, w];
-        });
-        await refreshFloor();
-      } catch (error) {
-        alert(error instanceof Error ? error.message : "Failed to clock in worker");
-      }
+      const w = await workerClockOut(workerId);
+      setCheckedInWorkers((prev) => prev.map((c) => (c.workerId === workerId ? w : c)));
+      await refreshFloor();
+      return;
     }
-  };
-  const checkedInSet = new Set(
-    checkedInWorkers.filter((c) => !c.checkedOutAt).map((c) => c.workerId),
-  );
 
-  const clockedOutSet = new Set(
-    checkedInWorkers.filter((c) => c.checkedOutAt).map((c) => c.workerId),
-  );
+    const w = await workerCheckIn(workerId);
+    setCheckedInWorkers((prev) => {
+      const filtered = prev.filter((c) => c.workerId !== workerId);
+      return [...filtered, w];
+    });
+    await refreshFloor();
+  };
+  const checkedInSet = new Set([
+    ...workers.filter((worker) => worker.checkedIn).map((worker) => worker.workerId),
+    ...checkedInWorkers.filter((c) => !c.checkedOutAt).map((c) => c.workerId),
+  ]);
 
   const handleStartDay = async () => {
     try {
@@ -417,11 +454,6 @@ function Dashboard({
     }
   };
 
-  const activeTurns = workers.filter((w) => w.activeTurn).length;
-  const readyCount = checkoutCheckins.length;
-  const availableCount = workers.filter((w) => w.status === "available" && checkedInSet.has(w.workerId)).length;
-  const totalSales = workers.reduce((sum, worker) => sum + worker.salesTodayCents, 0);
-  const totalTips = workers.reduce((sum, worker) => sum + worker.tipsTodayCents, 0);
   const recommendedWorker = getRecommendedWorker(workers, checkedInSet);
 
   const handleAssignWorker = async (workerId: string) => {
@@ -569,21 +601,6 @@ function Dashboard({
         <NoSessionFloorState apiOffline={apiOffline} onStartDay={handleStartDay} />
       ) : (
         <>
-          <FloorKpiStrip
-            waitingCount={checkins.length}
-            availableCount={availableCount}
-            inServiceCount={activeTurns}
-            readyCount={readyCount}
-          />
-
-          <WorkerCheckInPanel
-            open={showWorkerCheckIn}
-            workers={workers}
-            checkedInWorkers={checkedInWorkers}
-            onToggle={() => setShowWorkerCheckIn((value) => !value)}
-            onClockToggle={handleWorkerClockToggle}
-          />
-
           <div className="floor-workspace">
             <WaitingQueuePanel
               checkins={checkins}
@@ -598,15 +615,37 @@ function Dashboard({
             <WorkerBoard
               workers={workers}
               checkedInSet={checkedInSet}
+              checkedInWorkers={checkedInWorkers}
               selectedCustomerName={selectedCheckin?.customer?.name ?? (selectedCheckin ? "Walk-in" : null)}
               recommendedWorkerId={recommendedWorker?.workerId ?? null}
               onAssign={handleAssignWorker}
+              onOpenWorkerClock={() => setWorkerClockModalOpen(true)}
             />
             <ReadyCheckoutRail
               checkins={checkoutCheckins}
               onStartSale={(checkinId) => { void handleStartSale(checkinId); }}
             />
           </div>
+
+          <WorkerClockModal
+            open={workerClockModalOpen}
+            workers={workers}
+            checkedInWorkers={checkedInWorkers}
+            loadingWorkerId={clockActionWorkerId}
+            error={clockActionError}
+            onClose={() => setWorkerClockModalOpen(false)}
+            onToggleWorker={async (workerId) => {
+              setClockActionWorkerId(workerId);
+              setClockActionError("");
+              try {
+                await handleWorkerClockToggle(workerId);
+              } catch (error) {
+                setClockActionError(error instanceof Error ? error.message : "Failed to update worker clock status.");
+              } finally {
+                setClockActionWorkerId(null);
+              }
+            }}
+          />
 
           <TurnMatrixPanel
             open={showTurnMatrix}
@@ -644,7 +683,11 @@ function Dashboard({
               return (
                 <button
                   key={w.workerId}
-                  onClick={() => { void handleWorkerClockToggle(w.workerId); }}
+                  onClick={() => {
+                    void handleWorkerClockToggle(w.workerId).catch((error) => {
+                      alert(error instanceof Error ? error.message : "Failed to update worker clock status");
+                    });
+                  }}
                   disabled={isCheckedIn}
                   title={isCheckedIn ? `Checked in at ${new Date(checkedInWorkers.find((c) => c.workerId === w.workerId)?.checkedInAt ?? "").toLocaleTimeString()}` : "Click to check in"}
                   style={{
@@ -674,15 +717,6 @@ function Dashboard({
           </div>
         </div>
       )}
-
-      {/* Stats row */}
-      <div className="grid--stats" style={{ display: "grid", gap: "var(--space-3)", marginBottom: "var(--space-6)" }}>
-        <StatCard label="Waiting" value={String(checkins.length)} />
-        <StatCard label="In Service" value={String(activeTurns)} />
-        <StatCard label="Ready" value={String(readyCount)} sub="for checkout" />
-        <StatCard label="Sales Today" value={formatMoney(totalSales)} />
-        <StatCard label="Tips Today" value={formatMoney(totalTips)} />
-      </div>
 
       {/* Waiting queue + Turns + Ready for checkout */}
       <div className="grid">
@@ -951,107 +985,131 @@ function NoSessionFloorState({
   );
 }
 
-function FloorKpiStrip({
-  waitingCount,
-  availableCount,
-  inServiceCount,
-  readyCount,
+function WorkerClockTrigger({
+  workers,
+  checkedInWorkers,
+  onOpen,
+  compact = false,
 }: {
-  waitingCount: number;
-  availableCount: number;
-  inServiceCount: number;
-  readyCount: number;
+  workers: TurnDashboardWorker[];
+  checkedInWorkers: CheckedInWorker[];
+  onOpen: () => void;
+  compact?: boolean;
 }) {
+  const checkedInCount = getClockedInCount(workers, checkedInWorkers);
+
   return (
-    <section className="floor-kpis" aria-label="Floor assignment summary">
-      <FloorKpi label="Waiting" value={waitingCount} tone="warning" />
-      <FloorKpi label="Available" value={availableCount} tone="success" />
-      <FloorKpi label="In Service" value={inServiceCount} tone="info" />
-      <FloorKpi label="Ready" value={readyCount} tone="success" />
-    </section>
+    <button className={`worker-clock-trigger ${compact ? "worker-clock-trigger--board" : ""}`} type="button" onClick={onOpen}>
+      <span>
+        <strong>Clock In/ Clock Out</strong>
+        <small>{checkedInCount}/{workers.length} clocked in</small>
+      </span>
+    </button>
   );
 }
 
-function FloorKpi({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: number;
-  tone: "success" | "warning" | "info";
-}) {
-  return (
-    <div className={`floor-kpi floor-kpi--${tone}`}>
-      <span className="floor-kpi__label">{label}</span>
-      <strong className="floor-kpi__value">{value}</strong>
-    </div>
-  );
-}
-
-function WorkerCheckInPanel({
+function WorkerClockModal({
   open,
   workers,
   checkedInWorkers,
-  onToggle,
-  onClockToggle,
+  loadingWorkerId,
+  error,
+  onClose,
+  onToggleWorker,
 }: {
   open: boolean;
   workers: TurnDashboardWorker[];
   checkedInWorkers: CheckedInWorker[];
-  onToggle: () => void;
-  onClockToggle: (workerId: string) => void;
+  loadingWorkerId: string | null;
+  error: string;
+  onClose: () => void;
+  onToggleWorker: (workerId: string) => Promise<void>;
 }) {
-  const checkedInSet = new Set(
-    checkedInWorkers.filter((c) => !c.checkedOutAt).map((worker) => worker.workerId),
-  );
-  const clockedOutSet = new Set(
-    checkedInWorkers.filter((c) => c.checkedOutAt).map((worker) => worker.workerId),
-  );
+  const checkedInCount = getClockedInCount(workers, checkedInWorkers);
+
   return (
-    <Card padding="md" className="floor-collapse">
-      <button className="floor-collapse__header" type="button" onClick={onToggle} aria-expanded={open}>
-        <span>
-          <strong>Worker Clock In / Out</strong>
-          <small>{checkedInSet.size}/{workers.length} clocked in</small>
-        </span>
-        <Badge variant={open ? "info" : "default"}>{open ? "Hide" : "Show"}</Badge>
-      </button>
-      {open && (
-        <div className="floor-worker-checkin">
-          {workers.length === 0 ? (
-            <p className="text-muted text-sm">No workers loaded for this session.</p>
-          ) : (
-            workers.map((worker) => {
-              const isClockedIn = checkedInSet.has(worker.workerId);
-              const isClockedOut = clockedOutSet.has(worker.workerId);
-              const entry = checkedInWorkers.find((e) => e.workerId === worker.workerId);
-              return (
-                <button
-                  key={worker.workerId}
-                  className={`floor-checkin-chip ${isClockedIn ? "floor-checkin-chip--checked" : ""} ${isClockedOut ? "floor-checkin-chip--clocked-out" : ""}`}
-                  type="button"
-                  disabled={worker.status === "off_today"}
-                  onClick={() => onClockToggle(worker.workerId)}
-                >
-                  <span>{worker.name}</span>
-                  <small>
-                    {isClockedIn && entry
-                      ? `In ${new Date(entry.checkedInAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
-                      : isClockedOut
-                        ? "Clocked out"
-                        : worker.status === "off_today"
-                          ? "Off today"
-                          : "Tap to clock in"}
-                  </small>
-                </button>
-              );
-            })
-          )}
+    <Modal open={open} onClose={onClose} title="Worker Clock In / Out" className="worker-clock-modal">
+      <div className="worker-clock-modal__summary">
+        <strong>{checkedInCount}/{workers.length}</strong>
+        <span>workers clocked in</span>
+      </div>
+      {error && <p className="field__error">{error}</p>}
+      {workers.length === 0 ? (
+        <EmptyState icon="Staff" title="No workers loaded" description="Workers appear here after the floor session loads." />
+      ) : (
+        <div className="worker-clock-grid">
+          {workers.map((worker) => {
+            const state = getWorkerClockState(worker, checkedInWorkers);
+            const loading = loadingWorkerId === worker.workerId;
+            return (
+              <button
+                key={worker.workerId}
+                type="button"
+                className={`worker-clock-tile worker-clock-tile--${state.kind}`}
+                disabled={loadingWorkerId != null}
+                onClick={() => { void onToggleWorker(worker.workerId); }}
+                title={state.detail}
+              >
+                <strong>{worker.name}</strong>
+                <small>{loading ? "Updating..." : state.label}</small>
+              </button>
+            );
+          })}
         </div>
       )}
-    </Card>
+    </Modal>
   );
+}
+
+function getClockedInCount(workers: TurnDashboardWorker[], checkedInWorkers: CheckedInWorker[]) {
+  const checkedInSet = new Set([
+    ...workers.filter((worker) => worker.checkedIn).map((worker) => worker.workerId),
+    ...checkedInWorkers.filter((entry) => !entry.checkedOutAt).map((entry) => entry.workerId),
+  ]);
+  return checkedInSet.size;
+}
+
+type WorkerClockState = {
+  kind: "checked-in" | "clocked-out" | "not-checked-in" | "off-today";
+  label: string;
+  detail: string;
+};
+
+function getWorkerClockState(worker: TurnDashboardWorker, checkedInWorkers: CheckedInWorker[]): WorkerClockState {
+  const entry = checkedInWorkers.find((item) => item.workerId === worker.workerId);
+  if ((entry && !entry.checkedOutAt) || worker.checkedIn) {
+    return {
+      kind: "checked-in",
+      label: "Clocked in",
+      detail: entry?.checkedInAt ? `Since ${formatClockTime(entry.checkedInAt)}` : "Active in current session",
+    };
+  }
+
+  if (entry?.checkedOutAt) {
+    return {
+      kind: "clocked-out",
+      label: "Clocked out",
+      detail: `Out ${formatClockTime(entry.checkedOutAt)}`,
+    };
+  }
+
+  if (worker.status === "off_today") {
+    return {
+      kind: "off-today",
+      label: "Off today",
+      detail: "Not clocked in",
+    };
+  }
+
+  return {
+    kind: "not-checked-in",
+    label: "Not clocked in",
+    detail: "Ready to clock in",
+  };
+}
+
+function formatClockTime(value: string) {
+  return new Date(value).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
 function WaitingQueuePanel({
@@ -1142,21 +1200,26 @@ function WaitingQueuePanel({
 function WorkerBoard({
   workers,
   checkedInSet,
+  checkedInWorkers,
   selectedCustomerName,
   recommendedWorkerId,
   onAssign,
+  onOpenWorkerClock,
 }: {
   workers: TurnDashboardWorker[];
   checkedInSet: Set<string>;
+  checkedInWorkers: CheckedInWorker[];
   selectedCustomerName: string | null;
   recommendedWorkerId: string | null;
   onAssign: (workerId: string) => void;
+  onOpenWorkerClock: () => void;
 }) {
   const groups = [
     { status: "available", label: "Available" },
     { status: "in_service", label: "In Service" },
     { status: "on_break", label: "On Break" },
     { status: "off_today", label: "Off Today" },
+    { status: "not_checked_in", label: "Not Clocked In" },
   ];
 
   return (
@@ -1166,14 +1229,23 @@ function WorkerBoard({
           <p className="eyebrow">{selectedCustomerName ? `Assigning ${selectedCustomerName}` : "Worker status"}</p>
           <h2 className="card__title">Worker Board</h2>
         </div>
-        <Badge variant="info">{workers.length}</Badge>
+        <WorkerClockTrigger
+          workers={workers}
+          checkedInWorkers={checkedInWorkers}
+          onOpen={onOpenWorkerClock}
+          compact
+        />
       </div>
       {workers.length === 0 ? (
         <EmptyState icon="Staff" title="No workers loaded" description="Start a session and check the local API to show worker status." />
       ) : (
         <div className="floor-worker-groups">
           {groups.map((group) => {
-            const groupedWorkers = sortWorkersForFloor(workers).filter((worker) => worker.status === group.status);
+            const groupedWorkers = sortWorkersForFloor(workers).filter((worker) => {
+              const checkedIn = checkedInSet.has(worker.workerId);
+              const effectiveStatus = checkedIn ? worker.status : "not_checked_in";
+              return effectiveStatus === group.status;
+            });
             if (groupedWorkers.length === 0) return null;
             return (
               <section key={group.status} className="floor-worker-group">
@@ -1215,51 +1287,25 @@ function FloorWorkerCard({
   recommended: boolean;
   onAssign: (workerId: string) => void;
 }) {
-  const activeTurn = worker.activeTurn as { customerName?: string; serviceName?: string; startedAt?: string } | null;
-  const assignable = Boolean(selectedCustomerName && worker.status === "available" && checkedIn);
+  const effectiveStatus = checkedIn ? worker.status : "not_checked_in";
+  const assignable = Boolean(selectedCustomerName && effectiveStatus === "available");
+  const turnLabel = `${worker.turnsTakenToday} turn${worker.turnsTakenToday === 1 ? "" : "s"}`;
+  const statusLabel = effectiveStatus.replace(/_/g, " ");
 
   return (
     <button
       type="button"
       className={[
         "floor-worker-card",
+        `floor-worker-card--${effectiveStatus}`,
         assignable ? "floor-worker-card--assignable" : "",
-        recommended ? "floor-worker-card--recommended" : "",
       ].filter(Boolean).join(" ")}
       disabled={!assignable}
       onClick={() => onAssign(worker.workerId)}
+      aria-label={`${worker.name}, ${turnLabel}, ${statusLabel}${recommended ? ", recommended" : ""}`}
     >
-      <span className="floor-worker-card__top">
-        <span className="floor-worker-card__identity">
-          <span className={`worker-card__avatar ${statusAvatarClass(worker.status)}`}>
-            {(worker.name || "?")[0].toUpperCase()}
-          </span>
-          <span className="floor-worker-card__name-stack">
-            <strong>{worker.name}</strong>
-            <small>{checkedIn ? "Checked in" : "Not checked in"}</small>
-          </span>
-        </span>
-        <span className="floor-worker-card__badges">
-          {recommended && <Badge variant="success">Recommended</Badge>}
-          <StatusPill status={worker.status} />
-        </span>
-      </span>
-      <span className="floor-worker-card__stats">
-        <span>{worker.turnsTakenToday} turns</span>
-        <span>{worker.lastTurnEndedAt ? `Last ${timeAgo(worker.lastTurnEndedAt)}` : "No completed turns"}</span>
-        {worker.suggestionRank != null && <span>Rank #{worker.suggestionRank}</span>}
-      </span>
-      {activeTurn && (
-        <span className="floor-worker-card__active">
-          <strong>{activeTurn.customerName || "Customer"}</strong>
-          <small>{activeTurn.serviceName || "Service in progress"}</small>
-        </span>
-      )}
-      {assignable && (
-        <span className="floor-worker-card__cta">
-          Tap to assign{selectedCustomerName ? ` ${selectedCustomerName}` : ""}
-        </span>
-      )}
+      <strong className="floor-worker-card__name">{worker.name}</strong>
+      <span className="floor-worker-card__turns">{turnLabel}</span>
     </button>
   );
 }
@@ -2025,6 +2071,143 @@ type CheckoutItem = {
 
 type CheckoutMode = "active" | "done";
 
+type TerminalConfigForm = {
+  transport: TerminalConfig["transport"];
+  deviceBaseUrl: string;
+  deviceId: string;
+  posId: string;
+  accessToken: string;
+  wsHost: string;
+  wsPort: string;
+  wsPath: string;
+  wsSecure: boolean;
+  remoteApplicationId: string;
+  posName: string;
+  serialNumber: string;
+  authToken: string;
+};
+
+function defaultTerminalConfigForm(): TerminalConfigForm {
+  return {
+    transport: "mock",
+    deviceBaseUrl: "http://localhost:4100",
+    deviceId: "mock-clover-mini-1",
+    posId: "owner-pos-dev",
+    accessToken: "",
+    wsHost: "192.168.0.18",
+    wsPort: "12345",
+    wsPath: "/remote_pay",
+    wsSecure: true,
+    remoteApplicationId: "RQ07XH5Z3EX44.BT1G67W0JJFVC",
+    posName: "Nail Salon POS",
+    serialNumber: "C035UT24950367",
+    authToken: "",
+  };
+}
+
+function formFromTerminalConfig(config: TerminalConfig): TerminalConfigForm {
+  return {
+    ...defaultTerminalConfigForm(),
+    transport: config.transport,
+    deviceBaseUrl: config.deviceBaseUrl ?? "",
+    deviceId: config.deviceId ?? "",
+    posId: config.posId ?? "",
+    wsHost: config.wsHost ?? "",
+    wsPort: config.wsPort ? String(config.wsPort) : "12345",
+    wsPath: config.wsPath ?? "/remote_pay",
+    wsSecure: config.wsSecure ?? true,
+    remoteApplicationId: config.remoteApplicationId ?? "",
+    posName: config.posName ?? "Nail Salon POS",
+    serialNumber: config.serialNumber ?? "owner-pos-1",
+  };
+}
+
+function updateFromTerminalConfigForm(form: TerminalConfigForm) {
+  const wsPort = Number(form.wsPort || 0);
+  return {
+    transport: form.transport,
+    deviceBaseUrl: form.deviceBaseUrl.trim() || undefined,
+    deviceId: form.deviceId.trim() || undefined,
+    posId: form.posId.trim() || undefined,
+    accessToken: form.accessToken.trim() || undefined,
+    wsHost: form.wsHost.trim() || undefined,
+    wsPort: Number.isInteger(wsPort) && wsPort > 0 ? wsPort : undefined,
+    wsPath: form.wsPath.trim() || undefined,
+    wsSecure: form.wsSecure,
+    remoteApplicationId: form.remoteApplicationId.trim() || undefined,
+    posName: form.posName.trim() || undefined,
+    serialNumber: form.serialNumber.trim() || undefined,
+    authToken: form.authToken.trim() || undefined,
+  };
+}
+
+const TERMINAL_CONFIG_STORAGE_KEY = "nail.ownerPos.terminalConfig.v1";
+
+type StoredTerminalConfigForm = Omit<TerminalConfigForm, "accessToken" | "authToken">;
+
+function readStoredTerminalConfigForm(): TerminalConfigForm | null {
+  try {
+    const raw = window.localStorage.getItem(TERMINAL_CONFIG_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<StoredTerminalConfigForm>;
+    if (parsed.transport !== "mock" && parsed.transport !== "rest-local" && parsed.transport !== "usb-sidecar" && parsed.transport !== "ws-lan") {
+      return null;
+    }
+    return {
+      ...defaultTerminalConfigForm(),
+      ...parsed,
+      wsPort: parsed.wsPort ? String(parsed.wsPort) : "12345",
+      wsSecure: parsed.wsSecure ?? true,
+      accessToken: "",
+      authToken: "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function storeTerminalConfigForm(form: TerminalConfigForm) {
+  const { accessToken: _accessToken, authToken: _authToken, ...safeForm } = form;
+  window.localStorage.setItem(TERMINAL_CONFIG_STORAGE_KEY, JSON.stringify(safeForm));
+}
+
+function readCheckoutDraft(): CheckoutDraft | null {
+  try {
+    const raw = window.localStorage.getItem(CHECKOUT_DRAFT_STORAGE_KEY);
+    if (!raw) return null;
+    const draft = JSON.parse(raw) as CheckoutDraft;
+    if (!draft.savedAt || Date.now() - draft.savedAt > CHECKOUT_DRAFT_MAX_AGE_MS) {
+      window.localStorage.removeItem(CHECKOUT_DRAFT_STORAGE_KEY);
+      return null;
+    }
+    if (draft.mode !== "active" && draft.mode !== "done") return null;
+    return {
+      saleId: draft.saleId ?? null,
+      items: Array.isArray(draft.items) ? draft.items : [],
+      payments: Array.isArray(draft.payments) ? draft.payments : [],
+      selectedWorkerId: draft.selectedWorkerId ?? null,
+      amountCents: Number.isInteger(draft.amountCents) ? draft.amountCents : 0,
+      changeCents: Number.isInteger(draft.changeCents) ? draft.changeCents : 0,
+      hasStarted: Boolean(draft.hasStarted),
+      activeCategory: draft.activeCategory || "All",
+      activeMethod: draft.activeMethod || "cash",
+      pendingTipAllocation: draft.pendingTipAllocation ?? null,
+      mode: draft.mode,
+      savedAt: draft.savedAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeCheckoutDraft(draft: CheckoutDraft) {
+  window.localStorage.setItem(CHECKOUT_DRAFT_STORAGE_KEY, JSON.stringify({ ...draft, savedAt: Date.now() }));
+}
+
+function clearCheckoutDraft() {
+  window.localStorage.removeItem(CHECKOUT_DRAFT_STORAGE_KEY);
+}
+
 function CheckoutScreen({ onBack }: { onBack: () => void }) {
   const [mode, setMode] = useState<CheckoutMode>("active");
   const [saleId, setSaleId] = useState<string | null>(null);
@@ -2034,12 +2217,30 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
   const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null);
   const [payments, setPayments] = useState<PaymentEntry[]>([]);
   const [amountCents, setAmountCents] = useState(0);
+  const [paymentAmountModalOpen, setPaymentAmountModalOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [activeMethod, setActiveMethod] = useState("cash");
   const [changeCents, setChangeCents] = useState(0);
   const [hasStarted, setHasStarted] = useState(false);
   const [activeCategory, setActiveCategory] = useState("All");
+  const [showCustomServiceModal, setShowCustomServiceModal] = useState(false);
+  const [customServiceName, setCustomServiceName] = useState("");
+  const [customServicePriceCents, setCustomServicePriceCents] = useState(0);
+  const [customServiceCategory, setCustomServiceCategory] = useState("Custom");
+  const [customServiceError, setCustomServiceError] = useState("");
+  const [pendingTipAllocation, setPendingTipAllocation] = useState<{ paymentId: string; tipCents: number } | null>(null);
+  const [terminalStatus, setTerminalStatus] = useState<TerminalStatus | null>(null);
+  const [terminalStatusLoading, setTerminalStatusLoading] = useState(false);
+  const [pairingModalOpen, setPairingModalOpen] = useState(false);
+  const [pairingError, setPairingError] = useState("");
+  const [pairingCodeInput, setPairingCodeInput] = useState("");
+  const [terminalConfigOpen, setTerminalConfigOpen] = useState(false);
+  const [terminalConfig, setTerminalConfig] = useState<TerminalConfig | null>(null);
+  const [terminalConfigForm, setTerminalConfigForm] = useState<TerminalConfigForm>(() => readStoredTerminalConfigForm() ?? defaultTerminalConfigForm());
+  const [terminalConfigError, setTerminalConfigError] = useState("");
+  const [terminalConfigSaving, setTerminalConfigSaving] = useState(false);
+  const [checkoutDraftLoaded, setCheckoutDraftLoaded] = useState(false);
 
   const subtotal = items.reduce((s, i) => s + i.priceCents, 0);
   const discounts = items.reduce((s, i) => s + i.discountCents, 0);
@@ -2052,6 +2253,21 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
   const selectedWorkerName = selectedWorker
     ? (selectedWorker.displayName || selectedWorker.user?.name || "Worker")
     : null;
+  const terminalTransport = terminalConfig?.transport ?? terminalConfigForm.transport;
+  const isRealCloverLan = terminalTransport === "ws-lan";
+  const terminalEndpoint = terminalConfig?.wsUrl
+    ?? (terminalConfig?.wsHost
+      ? `${terminalConfig.wsSecure === false ? "ws" : "wss"}://${terminalConfig.wsHost}${terminalConfig.wsPort ? `:${terminalConfig.wsPort}` : ""}${terminalConfig.wsPath ?? "/remote_pay"}`
+      : "Not configured");
+  const terminalStep = terminalStatus?.connected
+    ? "ready"
+    : terminalStatus?.pairingCode
+      ? "pair"
+      : terminalStatusLoading
+        ? "checking"
+        : isRealCloverLan
+          ? "waiting"
+          : "offline";
 
   const categoryNames = ["All", ...Array.from(new Set(services.map((s) => s.category?.name).filter(Boolean)))] as string[];
   const filteredServices = activeCategory === "All"
@@ -2069,21 +2285,193 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
     setLoading(true);
     setError("");
     try {
+      const draft = readCheckoutDraft();
       const [sale, svcs, wrks] = await Promise.all([
-        createSale({}),
+        draft?.saleId ? Promise.resolve({ id: draft.saleId }) : createSale({}),
         fetchServices({ active: true }),
         fetchWorkers(),
       ]);
       setSaleId(sale.id);
       setServices(svcs);
       setWorkers(wrks.filter((w) => w.active));
-      setHasStarted(true);
+      if (draft) {
+        setItems(draft.items);
+        setPayments(draft.payments);
+        setSelectedWorkerId(draft.selectedWorkerId);
+        setAmountCents(draft.amountCents);
+        setChangeCents(draft.changeCents);
+        setHasStarted(draft.hasStarted);
+        setActiveCategory(draft.activeCategory);
+        setActiveMethod(draft.activeMethod);
+        setPendingTipAllocation(draft.pendingTipAllocation);
+        setMode(draft.mode);
+      } else {
+        setHasStarted(true);
+      }
     } catch {
       setError("Failed to start sale. Check API connection.");
     } finally {
+      setCheckoutDraftLoaded(true);
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    void initSale();
+  }, []);
+
+  useEffect(() => {
+    if (!checkoutDraftLoaded) return;
+    writeCheckoutDraft({
+      saleId,
+      items,
+      payments,
+      selectedWorkerId,
+      amountCents,
+      changeCents,
+      hasStarted,
+      activeCategory,
+      activeMethod,
+      pendingTipAllocation,
+      mode,
+      savedAt: Date.now(),
+    });
+  }, [checkoutDraftLoaded, saleId, items, payments, selectedWorkerId, amountCents, changeCents, hasStarted, activeCategory, activeMethod, pendingTipAllocation, mode]);
+
+  const updateTerminalStatus = (status: TerminalStatus) => {
+    setTerminalStatus(status);
+    if (status.pairingRequired || status.pairingCode) {
+      setPairingModalOpen(true);
+    }
+    if (status.connected) {
+      setPairingError("");
+      setPairingModalOpen(false);
+    }
+  };
+
+  const refreshTerminalStatus = async () => {
+    setTerminalStatusLoading(true);
+    try {
+      updateTerminalStatus(await fetchTerminalStatus());
+    } catch (err) {
+      setTerminalStatus({
+        connected: false,
+        provider: "clover",
+        message: err instanceof Error ? err.message : "Unable to reach payment terminal",
+      });
+    } finally {
+      setTerminalStatusLoading(false);
+    }
+  };
+
+  const loadTerminalConfig = async () => {
+    setTerminalConfigError("");
+    const storedForm = readStoredTerminalConfigForm();
+    if (storedForm) {
+      setTerminalConfigForm(storedForm);
+    }
+    try {
+      const config = await fetchTerminalConfig();
+      if (storedForm) {
+        const result = await updateTerminalConfig(updateFromTerminalConfigForm(storedForm));
+        setTerminalConfig(result.config);
+        setTerminalConfigForm(formFromTerminalConfig(result.config));
+        updateTerminalStatus(result.status);
+      } else {
+        setTerminalConfig(config);
+        setTerminalConfigForm(formFromTerminalConfig(config));
+      }
+    } catch (err) {
+      setTerminalConfigError(err instanceof Error ? err.message : "Unable to load Clover settings.");
+    }
+  };
+
+  const openTerminalConfig = () => {
+    setTerminalConfigOpen(true);
+    void loadTerminalConfig();
+  };
+
+  const saveTerminalConfig = async () => {
+    setTerminalConfigSaving(true);
+    setTerminalConfigError("");
+    try {
+      const result = await updateTerminalConfig(updateFromTerminalConfigForm(terminalConfigForm));
+      setTerminalConfig(result.config);
+      const nextForm = formFromTerminalConfig(result.config);
+      setTerminalConfigForm(nextForm);
+      storeTerminalConfigForm(nextForm);
+      updateTerminalStatus(result.status);
+      setTerminalConfigOpen(false);
+      if (result.config.transport === "ws-lan" && !result.status.connected) {
+        setPairingModalOpen(true);
+      }
+    } catch (err) {
+      setTerminalConfigError(err instanceof Error ? err.message : "Unable to save Clover settings.");
+    } finally {
+      setTerminalConfigSaving(false);
+    }
+  };
+
+  const beginTerminalPairing = async () => {
+    setTerminalStatusLoading(true);
+    setPairingError("");
+    setPairingCodeInput("");
+    setPairingModalOpen(true);
+    try {
+      updateTerminalStatus(await startTerminalPairing());
+    } catch (err) {
+      setPairingError(err instanceof Error ? err.message : "Unable to start Clover pairing.");
+    } finally {
+      setTerminalStatusLoading(false);
+    }
+  };
+
+  const submitTerminalPairingCode = async () => {
+    const code = pairingCodeInput.trim();
+    if (!code) {
+      setPairingError("Enter the pairing code shown on the Clover device.");
+      return;
+    }
+    setTerminalStatusLoading(true);
+    setPairingError("");
+    try {
+      updateTerminalStatus(await confirmTerminalPairing(code));
+    } catch (err) {
+      setPairingError(err instanceof Error ? err.message : "Pairing code did not match.");
+    } finally {
+      setTerminalStatusLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void refreshTerminalStatus();
+    void loadTerminalConfig();
+  }, []);
+
+  useEffect(() => {
+    if (activeMethod === "card") {
+      void refreshTerminalStatus();
+    }
+  }, [activeMethod]);
+
+  useEffect(() => {
+    if (!pairingModalOpen) return;
+    const pollPairing = async () => {
+      try {
+        updateTerminalStatus(await fetchTerminalPairStatus());
+      } catch (err) {
+        setPairingError(err instanceof Error ? err.message : "Unable to refresh Clover pairing status.");
+      }
+    };
+    const intervalId = window.setInterval(() => { void pollPairing(); }, 2000);
+    return () => window.clearInterval(intervalId);
+  }, [pairingModalOpen]);
+
+  useEffect(() => {
+    if (activeMethod !== "card" || terminalConfig?.transport !== "ws-lan" || terminalStatus?.connected) return;
+    const intervalId = window.setInterval(() => { void refreshTerminalStatus(); }, 3000);
+    return () => window.clearInterval(intervalId);
+  }, [activeMethod, terminalConfig?.transport, terminalStatus?.connected]);
 
   const handleSelectWorker = (worker: Worker) => {
     setError("");
@@ -2102,24 +2490,84 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
         serviceId: svc.id,
         workerId: selectedWorkerId,
       });
-      const saleItemId =
-        result.saleItem && typeof result.saleItem === "object" && "id" in result.saleItem
-          ? String(result.saleItem.id)
-          : undefined;
-      setItems([
-        ...items,
-        {
-          saleItemId,
-          serviceName: svc.name,
-          workerName: selectedWorkerName || "Worker",
-          category: svc.category?.name ?? "",
-          priceCents: svc.priceCents,
-          discountCents: 0,
-          tipCents: 0,
-        },
-      ]);
+      addCheckoutItemFromResult(result.saleItem, {
+        serviceName: svc.name,
+        workerName: selectedWorkerName || "Worker",
+        category: svc.category?.name ?? "",
+        priceCents: svc.priceCents,
+      });
     } catch {
       setError("Failed to add service.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const addCheckoutItemFromResult = (
+    saleItem: Record<string, unknown>,
+    item: Omit<CheckoutItem, "saleItemId" | "discountCents" | "tipCents">
+  ) => {
+    const saleItemId =
+      saleItem && typeof saleItem === "object" && "id" in saleItem
+        ? String(saleItem.id)
+        : undefined;
+    setItems((prev) => [
+      ...prev,
+      {
+        saleItemId,
+        ...item,
+        discountCents: 0,
+        tipCents: 0,
+      },
+    ]);
+  };
+
+  const openCustomServiceModal = () => {
+    if (!selectedWorkerId || !saleId) {
+      setError("Select a worker first before adding a custom service.");
+      return;
+    }
+    setCustomServiceName("");
+    setCustomServicePriceCents(0);
+    setCustomServiceCategory("Custom");
+    setCustomServiceError("");
+    setShowCustomServiceModal(true);
+  };
+
+  const handleAddCustomService = async () => {
+    if (!selectedWorkerId || !saleId) {
+      setCustomServiceError("Select a worker first.");
+      return;
+    }
+    const name = customServiceName.trim();
+    if (!name) {
+      setCustomServiceError("Service name is required.");
+      return;
+    }
+    if (customServicePriceCents <= 0) {
+      setCustomServiceError("Enter a price greater than $0.00.");
+      return;
+    }
+
+    setCustomServiceError("");
+    setLoading(true);
+    try {
+      const category = customServiceCategory.trim() || "Custom";
+      const result = await addSaleItem(saleId, {
+        workerId: selectedWorkerId,
+        serviceName: name,
+        categoryName: category,
+        priceCents: customServicePriceCents,
+      });
+      addCheckoutItemFromResult(result.saleItem, {
+        serviceName: name,
+        workerName: selectedWorkerName || "Worker",
+        category,
+        priceCents: customServicePriceCents,
+      });
+      setShowCustomServiceModal(false);
+    } catch {
+      setCustomServiceError("Failed to add custom service.");
     } finally {
       setLoading(false);
     }
@@ -2135,42 +2583,87 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
     setItems(items.filter((_, i) => i !== idx));
   };
 
-  const updateTip = (idx: number, delta: number) => {
-    setItems((prev) =>
-      prev.map((it, i) =>
-        i === idx
-          ? { ...it, tipCents: Math.max(0, it.tipCents + delta) }
-          : it
-      )
-    );
-  };
-
   const makePaymentIdempotencyKey = () => {
     const randomId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     return `owner-pos-${saleId}-${randomId}`;
   };
 
-  const recordPayment = async (amount: number) => {
-    if (!saleId || amount <= 0) return;
+  const readCents = (value: unknown) => (typeof value === "number" && Number.isInteger(value) ? value : 0);
+
+  const applyAllocatedTips = (saleItems: Record<string, unknown>[]) => {
+    setItems((prev) => prev.map((item) => {
+      const updated = saleItems.find((saleItem) => String(saleItem.id) === item.saleItemId);
+      return updated ? { ...item, tipCents: readCents(updated.tipCents) } : item;
+    }));
+  };
+
+  const prepareCardTerminal = async () => {
+    const config = terminalConfig ?? await fetchTerminalConfig();
+    setTerminalConfig(config);
+    if (config.transport !== "ws-lan") return;
+
+    const status = await fetchTerminalStatus();
+    updateTerminalStatus(status);
+    if (!status.connected) {
+      setPairingModalOpen(true);
+    }
+  };
+
+  const paymentFailureMessage = (payment: Record<string, unknown>) => {
+    const raw = payment.rawProviderReference;
+    if (raw && typeof raw === "object" && "message" in raw && typeof raw.message === "string") {
+      return raw.message;
+    }
+    return "Card payment was sent to Clover but was not approved.";
+  };
+
+  const recordPayment = async (amount: number): Promise<boolean> => {
+    if (!saleId || amount <= 0) return false;
+
+    let recordedAmountCents = amount;
+    let recordedTipCents = 0;
 
     if (activeMethod === "cash") {
       await addCashPayment(saleId, { amountCents: amount });
     } else if (activeMethod === "gift_card") {
       await addGiftCardPayment(saleId, { amountCents: amount });
     } else if (activeMethod === "card") {
+      await prepareCardTerminal();
       const result = await addCardPayment(saleId, {
         amountCents: amount,
-        tipCents: 0,
         idempotencyKey: makePaymentIdempotencyKey(),
       });
       if (result.terminalStatus !== "approved") {
-        throw new Error("Card payment was not approved.");
+        throw new Error(paymentFailureMessage(result.payment));
+      }
+      recordedAmountCents = readCents(result.payment.amountCents) || amount;
+      recordedTipCents = readCents(result.payment.tipCents);
+      const paymentId = typeof result.payment.id === "string" ? result.payment.id : "";
+      if (paymentId && recordedTipCents > 0) {
+        setPendingTipAllocation({ paymentId, tipCents: recordedTipCents });
       }
     } else {
       throw new Error("Select a payment method.");
     }
 
-    setPayments((prev) => [...prev, { method: activeMethod, amountCents: amount }]);
+    setPayments((prev) => [...prev, { method: activeMethod, amountCents: recordedAmountCents, tipCents: recordedTipCents }]);
+    return true;
+  };
+
+  const openPaymentAmountModal = () => {
+    setAmountCents(0);
+    setPaymentAmountModalOpen(true);
+  };
+
+  const appendPaymentDigit = (digit: string) => {
+    setAmountCents((current) => {
+      const next = Number(`${current}${digit}`);
+      return Number.isSafeInteger(next) ? Math.min(next, 99999999) : current;
+    });
+  };
+
+  const backspacePaymentAmount = () => {
+    setAmountCents((current) => Math.floor(current / 10));
   };
 
   const addPayment = async () => {
@@ -2180,8 +2673,11 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
     setLoading(true);
     setError("");
     try {
-      await recordPayment(capped);
-      setAmountCents(0);
+      const recorded = await recordPayment(capped);
+      if (recorded) {
+        setAmountCents(0);
+        setPaymentAmountModalOpen(false);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Payment failed.");
     } finally {
@@ -2206,8 +2702,30 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
     }
   };
 
+  const allocatePendingTip = async (splitMode: "even_workers" | "service_amount_percentage") => {
+    if (!saleId || !pendingTipAllocation) return;
+    setLoading(true);
+    setError("");
+    try {
+      const result = await allocateCardTip(saleId, {
+        paymentId: pendingTipAllocation.paymentId,
+        splitMode,
+      });
+      applyAllocatedTips(result.saleItems);
+      setPendingTipAllocation(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to allocate tip.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const completeCheckout = async () => {
     if (!saleId) return;
+    if (pendingTipAllocation) {
+      setError("Allocate the Clover tip before completing checkout.");
+      return;
+    }
     setLoading(true);
     try {
       const result = await completeSale(saleId);
@@ -2221,16 +2739,26 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
   };
 
   const resetSale = () => {
+    clearCheckoutDraft();
+    setCheckoutDraftLoaded(false);
     setSaleId(null);
     setItems([]);
     setPayments([]);
     setSelectedWorkerId(null);
     setAmountCents(0);
+    setPaymentAmountModalOpen(false);
     setChangeCents(0);
     setError("");
     setHasStarted(false);
     setActiveCategory("All");
+    setActiveMethod("cash");
+    setPendingTipAllocation(null);
     setMode("active");
+  };
+
+  const startNewSale = () => {
+    resetSale();
+    void initSale();
   };
 
   // ── Done overlay ──
@@ -2261,7 +2789,7 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
           </div>
         )}
         <div className="checkout-done-overlay__actions">
-          <Button onClick={resetSale}>New Sale</Button>
+          <Button onClick={startNewSale}>New Sale</Button>
           <Button variant="secondary" onClick={() => { resetSale(); onBack(); }}>
             Back to Floor
           </Button>
@@ -2270,26 +2798,30 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
     );
   }
 
-  // ── Start (pre-init) screen ──
+  // ── Loading checkout workspace ──
   if (!hasStarted) {
     return (
       <div className="checkout-start">
-        <span style={{ fontSize: "3rem" }}>🚶</span>
-        <h2 style={{ margin: 0, fontSize: "var(--text-xl)", fontWeight: "var(--font-bold)" }}>New Sale</h2>
+        <span style={{ fontSize: "3rem" }}>💳</span>
+        <h2 style={{ margin: 0, fontSize: "var(--text-xl)", fontWeight: "var(--font-bold)" }}>Opening Checkout</h2>
         <p className="text-muted text-sm" style={{ maxWidth: 320 }}>
-          Create a walk-in sale. Select a worker, add services, and take payment — all on one screen.
+          Preparing a new sale...
         </p>
-        <Button size="lg" loading={loading} onClick={initSale}>
-          Start Sale
-        </Button>
-        <Button variant="ghost" size="sm" onClick={onBack}>← Back to Floor</Button>
+        {loading && <p className="text-muted text-sm">Loading...</p>}
         {error && <p className="field__error">{error}</p>}
+        {error && (
+          <Button size="lg" loading={loading} onClick={initSale}>
+            Retry
+          </Button>
+        )}
+        <Button variant="ghost" size="sm" onClick={onBack}>← Back to Floor</Button>
       </div>
     );
   }
 
   // ── Active workspace ──
   return (
+    <>
     <div className="checkout-workspace">
       {/* Top Bar */}
       <div className="checkout-topbar">
@@ -2306,7 +2838,7 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
         <Button
           size="sm"
           onClick={completeCheckout}
-          disabled={remaining > 0 || loading || items.length === 0}
+          disabled={remaining > 0 || loading || items.length === 0 || pendingTipAllocation !== null}
           loading={loading}
         >
           Complete
@@ -2354,7 +2886,12 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
 
         {/* Column 2: Service Catalog */}
         <div className="checkout-column">
-          <p className="checkout-column__title">💅 Services</p>
+          <div className="checkout-column__header">
+            <p className="checkout-column__title">💅 Services</p>
+            <Button size="sm" variant="secondary" onClick={openCustomServiceModal}>
+              Custom
+            </Button>
+          </div>
           {services.length === 0 ? (
             <EmptyState icon="💅" title="No services" description="Add services in the Services tab." />
           ) : (
@@ -2401,27 +2938,14 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
                       {item.workerName} · {item.category}
                     </span>
                     <div className="checkout-sale-item__tip-row">
-                      <span style={{ fontSize: "var(--text-xs)", color: "var(--color-text-muted)" }}>💰 Tip:</span>
-                      <button
-                        className="checkout-sale-item__tip-btn"
-                        onClick={() => updateTip(idx, -100)}
-                      >
-                        −
-                      </button>
-                      <span className="checkout-sale-item__tip-amount">
-                        {formatMoney(item.tipCents)}
+                      <span style={{ fontSize: "var(--text-xs)", color: "var(--color-text-muted)" }}>
+                        {item.tipCents > 0 ? `Tip allocated: ${formatMoney(item.tipCents)}` : "Tips are added on Clover during card payment."}
                       </span>
-                      <button
-                        className="checkout-sale-item__tip-btn"
-                        onClick={() => updateTip(idx, 100)}
-                      >
-                        +
-                      </button>
                     </div>
                   </div>
                   <div className="checkout-sale-item__right">
                     <span className="checkout-sale-item__price">
-                      {formatMoney(item.priceCents + item.tipCents - item.discountCents)}
+                      {formatMoney(item.priceCents - item.discountCents)}
                     </span>
                     <button
                       className="checkout-sale-item__remove"
@@ -2466,6 +2990,44 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
         <div className="checkout-column">
           <p className="checkout-column__title">💳 Payment</p>
           <div className="checkout-payment-panel">
+            <div
+              className={`terminal-status-card terminal-status-card--${terminalStep} ${terminalStatus?.connected ? "terminal-status-card--connected" : "terminal-status-card--disconnected"}`}
+            >
+              <div className="terminal-status-card__main">
+                <div className="terminal-status-card__header">
+                  <span className="terminal-status-card__badge">{terminalStep === "ready" ? "Ready" : terminalStep === "pair" ? "Pair" : terminalStep === "checking" ? "Checking" : "Connect"}</span>
+                  <strong>{isRealCloverLan ? "Clover Mini 3 LAN" : terminalTransport === "rest-local" ? "Mock Clover REST" : "Mock terminal"}</strong>
+                </div>
+                <span>{terminalStatus?.message ?? "Checking payment terminal..."}</span>
+                {terminalStatus?.pairingCode && <div className="terminal-inline-code">Enter on Clover: {terminalStatus.pairingCode}</div>}
+                <details className="terminal-info-popover">
+                  <summary aria-label="Show Clover connection details">i</summary>
+                  <div className="terminal-info-popover__content">
+                    <ol className="terminal-process-list" aria-label="Clover connection process">
+                      <li className={terminalConfig ? "terminal-process-list__step--done" : "terminal-process-list__step--active"}>Configure Clover IP, app ID, and device serial.</li>
+                      <li className={terminalStatus?.pairingCode || terminalStatus?.connected ? "terminal-process-list__step--done" : "terminal-process-list__step--active"}>Start connection from the local API.</li>
+                      <li className={terminalStatus?.connected ? "terminal-process-list__step--done" : terminalStatus?.pairingCode ? "terminal-process-list__step--active" : ""}>If a code appears here, enter it on the Clover Mini.</li>
+                      <li className={terminalStatus?.connected ? "terminal-process-list__step--done" : ""}>Wait for “Ready”, then run card payment.</li>
+                    </ol>
+                    <span>Endpoint: {terminalEndpoint}</span>
+                    {terminalConfig?.remoteApplicationId && <span>App: {terminalConfig.remoteApplicationId}</span>}
+                    {terminalConfig?.serialNumber && <span>Device: {terminalConfig.serialNumber}</span>}
+                  </div>
+                </details>
+              </div>
+              <div className="terminal-status-card__actions">
+                <button type="button" onClick={openTerminalConfig} disabled={terminalStatusLoading}>
+                  Configure
+                </button>
+                <button type="button" onClick={() => { void beginTerminalPairing(); }} disabled={terminalStatusLoading || terminalTransport === "mock"}>
+                  Connect / Pair
+                </button>
+                <button type="button" onClick={() => { void refreshTerminalStatus(); }} disabled={terminalStatusLoading}>
+                  {terminalStatusLoading ? "..." : "Refresh"}
+                </button>
+              </div>
+            </div>
+
             {/* Method selector */}
             <div className="payment-methods">
               {[
@@ -2495,34 +3057,40 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
             </div>
 
             {/* Exact payment button */}
-            {remaining > 0 && (
-              <Button fullWidth variant="secondary" onClick={exactPayment} loading={loading} size="sm">
-                Pay Exact — {formatMoney(remaining)}
-              </Button>
+            {activeMethod === "card" && terminalConfig?.transport === "ws-lan" && !terminalStatus?.connected && (
+              <div className="card-payment-readiness">
+                <strong>Clover is not ready</strong>
+                <span>You can still press Send to call the Clover WebSocket adapter, but Clover may reject it until the Mini reports Ready.</span>
+                <button type="button" onClick={() => { void beginTerminalPairing(); }} disabled={terminalStatusLoading}>Connect Clover</button>
+              </div>
             )}
-
-            {/* Custom amount */}
-            <AmountInput
-              label="Custom Amount"
-              valueCents={amountCents}
-              onChangeCents={setAmountCents}
-            />
-            <Button
-              fullWidth
-              variant="ghost"
-              size="sm"
-              onClick={addPayment}
-              disabled={amountCents <= 0 || loading}
-            >
-              Add Payment
-            </Button>
+            <div className="payment-action-stack">
+              {remaining > 0 && (
+                <Button fullWidth variant="secondary" onClick={exactPayment} loading={loading} size="lg" className="payment-touch-button">
+                  {activeMethod === "card" && terminalConfig?.transport === "ws-lan" ? "Send Exact to Clover" : "Pay Exact"}
+                  <span className="payment-touch-button__amount">{formatMoney(remaining)}</span>
+                </Button>
+              )}
+              <Button
+                fullWidth
+                variant="ghost"
+                size="lg"
+                className="payment-touch-button payment-touch-button--custom"
+                onClick={openPaymentAmountModal}
+                disabled={remaining <= 0 || loading}
+              >
+                Enter Custom Amount
+              </Button>
+            </div>
 
             {/* Payment entries */}
             {payments.length > 0 && (
               <div className="payment-entries">
                 {payments.map((p, i) => (
                   <div key={i} className="payment-entry">
-                    <span className="payment-entry__method">{methodLabel(p.method)}</span>
+                    <span className="payment-entry__method">
+                      {methodLabel(p.method)}{p.tipCents ? ` · tip ${formatMoney(p.tipCents)}` : ""}
+                    </span>
                     <span className="payment-entry__amount">{formatMoney(p.amountCents)}</span>
                     <button className="payment-entry__remove" onClick={() => removePayment(i)}>✕</button>
                   </div>
@@ -2533,6 +3101,231 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
         </div>
       </div>
     </div>
+    <Modal
+      open={paymentAmountModalOpen}
+      onClose={() => setPaymentAmountModalOpen(false)}
+      title={`${methodLabel(activeMethod)} Amount`}
+      className="payment-keypad-modal"
+      footer={
+        <>
+          <Button variant="secondary" size="lg" onClick={() => setPaymentAmountModalOpen(false)}>Cancel</Button>
+          <Button size="lg" onClick={() => { void addPayment(); }} loading={loading} disabled={amountCents <= 0 || remaining <= 0}>
+            {activeMethod === "card" && terminalConfig?.transport === "ws-lan" ? "Send to Clover" : `Add ${methodLabel(activeMethod)}`}
+          </Button>
+        </>
+      }
+    >
+      <div className="payment-keypad">
+        <div className="payment-keypad__display" aria-live="polite">
+          <span>Amount</span>
+          <strong>{formatMoney(amountCents)}</strong>
+          <small>Remaining {formatMoney(remaining)}</small>
+        </div>
+        <div className="payment-keypad__grid" aria-label="Payment amount keypad">
+          {["1", "2", "3", "4", "5", "6", "7", "8", "9"].map((digit) => (
+            <button key={digit} type="button" onClick={() => appendPaymentDigit(digit)}>{digit}</button>
+          ))}
+          <button type="button" onClick={() => appendPaymentDigit("0")}>0</button>
+          <button type="button" onClick={() => appendPaymentDigit("00")}>00</button>
+          <button type="button" onClick={backspacePaymentAmount}>⌫</button>
+        </div>
+        <div className="payment-keypad__shortcuts">
+          <button type="button" onClick={() => setAmountCents(0)}>Clear</button>
+          <button type="button" onClick={() => setAmountCents(Math.floor(remaining / 2))}>Half</button>
+          <button type="button" onClick={() => setAmountCents(remaining)}>Remaining</button>
+        </div>
+      </div>
+    </Modal>
+    <Modal
+      open={terminalConfigOpen}
+      onClose={() => setTerminalConfigOpen(false)}
+      title="Clover Connection Settings"
+      className="terminal-config-modal"
+      footer={
+        <>
+          <Button variant="secondary" onClick={() => setTerminalConfigOpen(false)}>Cancel</Button>
+          <Button onClick={() => { void saveTerminalConfig(); }} loading={terminalConfigSaving}>Save & Connect</Button>
+        </>
+      }
+    >
+      <div className="terminal-config-form">
+        <p className="text-muted text-sm" style={{ marginTop: 0 }}>
+          Configure the payment terminal used by this Checkout tab. Save & Connect applies the config on the local API, then starts the Clover LAN connection. Tokens are kept on the local API and are never shown in full.
+        </p>
+        <Select
+          label="Terminal Mode"
+          value={terminalConfigForm.transport}
+          onChange={(event) => setTerminalConfigForm((form) => ({ ...form, transport: event.target.value as TerminalConfigForm["transport"] }))}
+          options={[
+            { value: "mock", label: "Built-in mock terminal" },
+            { value: "ws-lan", label: "Real Clover LAN WebSocket" },
+            { value: "rest-local", label: "Mock Clover / REST-local" },
+          ]}
+        />
+        {terminalConfigForm.transport === "ws-lan" && (
+          <>
+            <div className="clover-process-panel clover-process-panel--compact">
+              <div><strong>Real Mini 3 process:</strong> enter the Clover IP, application ID, and device serial; save; enter the POS pairing code on the Clover if prompted; wait for Ready.</div>
+            </div>
+            <Input label="Clover LAN Host/IP" value={terminalConfigForm.wsHost} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, wsHost: event.target.value }))} placeholder="192.168.0.18" />
+            <Input label="WebSocket Port" value={terminalConfigForm.wsPort} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, wsPort: event.target.value.replace(/\D/g, "") }))} placeholder="12345" />
+            <Input label="WebSocket Path" value={terminalConfigForm.wsPath} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, wsPath: event.target.value }))} placeholder="/remote_pay" />
+            <label className="field terminal-config-checkbox">
+              <span className="field__label">Secure WebSocket</span>
+              <input type="checkbox" checked={terminalConfigForm.wsSecure} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, wsSecure: event.target.checked }))} />
+              <span>{terminalConfigForm.wsSecure ? "wss://" : "ws://"}</span>
+            </label>
+            <Input label="Remote App ID" value={terminalConfigForm.remoteApplicationId} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, remoteApplicationId: event.target.value }))} placeholder="RQ07XH5Z3EX44.BT1G67W0JJFVC" />
+            <Input label="POS Name Shown on Clover" value={terminalConfigForm.posName} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, posName: event.target.value }))} placeholder="Nail Salon POS" />
+            <Input label="Clover Device Serial" value={terminalConfigForm.serialNumber} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, serialNumber: event.target.value }))} placeholder="C035UT24950367" />
+            <Input label={`Auth Token${terminalConfig?.authTokenPreview ? ` (${terminalConfig.authTokenPreview})` : ""}`} value={terminalConfigForm.authToken} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, authToken: event.target.value }))} placeholder="Leave blank to keep existing token" />
+          </>
+        )}
+        {terminalConfigForm.transport === "rest-local" && (
+          <>
+            <Input label="Mock Clover Base URL" value={terminalConfigForm.deviceBaseUrl} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, deviceBaseUrl: event.target.value }))} placeholder="http://localhost:4100" />
+            <Input label="Device ID" value={terminalConfigForm.deviceId} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, deviceId: event.target.value }))} placeholder="mock-clover-mini-1" />
+            <Input label="POS ID" value={terminalConfigForm.posId} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, posId: event.target.value }))} placeholder="owner-pos-dev" />
+            <Input label={`Access Token${terminalConfig?.accessTokenPreview ? ` (${terminalConfig.accessTokenPreview})` : ""}`} value={terminalConfigForm.accessToken} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, accessToken: event.target.value }))} placeholder="Leave blank to keep existing token" />
+          </>
+        )}
+        {terminalConfigError && <p className="field__error">{terminalConfigError}</p>}
+      </div>
+    </Modal>
+    <Modal
+      open={pairingModalOpen}
+      onClose={() => setPairingModalOpen(false)}
+      title={isRealCloverLan ? "Connect Clover Mini 3" : "Pair Clover Device"}
+      className="clover-pairing-modal"
+      footer={
+        <>
+          <Button variant="secondary" onClick={() => { void refreshTerminalStatus(); }} loading={terminalStatusLoading}>
+            Refresh Status
+          </Button>
+          <Button variant="secondary" onClick={() => { void beginTerminalPairing(); }} loading={terminalStatusLoading}>
+            Restart Connect
+          </Button>
+          {!isRealCloverLan && (
+            <Button onClick={() => { void submitTerminalPairingCode(); }} loading={terminalStatusLoading}>
+              Pair
+            </Button>
+          )}
+        </>
+      }
+    >
+      {terminalStatus?.connected ? (
+        <div className="clover-pairing-status clover-pairing-status--connected">
+          Clover is connected and ready for card payments.
+        </div>
+      ) : isRealCloverLan ? (
+        <div className="clover-pairing-content">
+          <div className="clover-process-panel">
+            <div><strong>1.</strong> Keep Secure Network Pay Display open on the Clover Mini.</div>
+            <div><strong>2.</strong> POS connects to {terminalEndpoint} from the local API.</div>
+            <div><strong>3.</strong> If Clover asks for pairing, enter the POS code below on the Clover Mini.</div>
+            <div><strong>4.</strong> Leave this window open until status changes to Ready.</div>
+          </div>
+          {terminalStatus?.pairingCode ? (
+            <>
+              <div className="clover-pairing-code">{terminalStatus.pairingCode}</div>
+              <p className="clover-pairing-status">Enter this code on the Clover Mini. The POS will continue automatically after Clover approves pairing.</p>
+            </>
+          ) : (
+            <p className="clover-pairing-status">{terminalStatus?.message ?? "Waiting for Clover to send a pairing code or ready status..."}</p>
+          )}
+          {pairingError && <p className="field__error">{pairingError}</p>}
+        </div>
+      ) : (
+        <div className="clover-pairing-content">
+          <p className="text-muted text-sm" style={{ marginTop: 0 }}>
+            For mock Clover, look at the code shown on the mock Clover screen, then enter that code here in POS.
+          </p>
+          <Input
+            label="Pairing Code"
+            value={pairingCodeInput}
+            onChange={(event) => setPairingCodeInput(event.target.value.replace(/\D/g, "").slice(0, 6))}
+            placeholder="123456"
+          />
+          <p className="clover-pairing-status">
+            {terminalStatus?.message ?? "Waiting for the code shown on mock Clover..."}
+          </p>
+          {pairingError && <p className="field__error">{pairingError}</p>}
+        </div>
+      )}
+    </Modal>
+    <Modal
+      open={pendingTipAllocation !== null}
+      onClose={() => {}}
+      title="Allocate Clover Tip"
+      className="checkout-tip-allocation-modal"
+      footer={
+        <>
+          <Button
+            variant="secondary"
+            onClick={() => { void allocatePendingTip("service_amount_percentage"); }}
+            loading={loading}
+          >
+            By Service Amount
+          </Button>
+          <Button
+            onClick={() => { void allocatePendingTip("even_workers"); }}
+            loading={loading}
+          >
+            Evenly Between Workers
+          </Button>
+        </>
+      }
+    >
+      <p className="text-muted text-sm" style={{ marginTop: 0 }}>
+        Clover returned a tip of <strong>{formatMoney(pendingTipAllocation?.tipCents ?? 0)}</strong>. Choose how to split it for worker reports.
+      </p>
+      <div className="tip-allocation-options">
+        <div className="tip-allocation-option">
+          <strong>By service amount</strong>
+          <span>Distributes the tip across all services by each discounted service amount.</span>
+        </div>
+        <div className="tip-allocation-option">
+          <strong>Evenly between workers</strong>
+          <span>Each worker receives the same tip share, then that worker's share is divided across their services by service amount.</span>
+        </div>
+      </div>
+    </Modal>
+    <Modal
+      open={showCustomServiceModal}
+      onClose={() => setShowCustomServiceModal(false)}
+      title="Add Custom Service"
+      className="checkout-custom-service-modal"
+      footer={
+        <>
+          <Button variant="secondary" onClick={() => setShowCustomServiceModal(false)}>Cancel</Button>
+          <Button onClick={handleAddCustomService} loading={loading}>Add Service</Button>
+        </>
+      }
+    >
+      <p className="text-muted text-sm" style={{ marginTop: 0 }}>
+        This creates a one-time checkout item only. It will not be added to the service catalog.
+      </p>
+      <Input
+        label="Service Name"
+        value={customServiceName}
+        onChange={(event) => setCustomServiceName(event.target.value)}
+        placeholder="e.g. Nail repair"
+        autoFocus
+      />
+      <Input
+        label="Category"
+        value={customServiceCategory}
+        onChange={(event) => setCustomServiceCategory(event.target.value)}
+        placeholder="Custom"
+      />
+      <AmountInput
+        label="Price"
+        valueCents={customServicePriceCents}
+        onChangeCents={setCustomServicePriceCents}
+      />
+      {customServiceError && <p className="field__error">{customServiceError}</p>}
+    </Modal>
+    </>
   );
 }
 
@@ -2547,6 +3340,7 @@ function ServicesScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [showAddModal, setShowAddModal] = useState(false);
+  const [showCategoryPicker, setShowCategoryPicker] = useState(false);
   const [editingService, setEditingService] = useState<Service | null>(null);
 
   /* ── Form state ── */
@@ -2607,6 +3401,14 @@ function ServicesScreen() {
   }, []);
 
   const catNames = ["all", ...Array.from(new Set(categories.map((c) => c.name)))];
+  const selectedFormCategory = categories.find((category) => category.id === formCategoryId) ?? null;
+  const categoryTiles = catNames.map((categoryName) => ({
+    key: categoryName,
+    label: categoryName === "all" ? "All" : categoryName,
+    count: categoryName === "all"
+      ? services.length
+      : services.filter((service) => (service.category?.name ?? service.categoryId) === categoryName).length,
+  }));
 
   const filtered =
     activeCat === "all"
@@ -2742,9 +3544,14 @@ function ServicesScreen() {
         <p className="eyebrow">Management</p>
         <div className="app-bar">
           <h1 className="app-bar__title">Services</h1>
-          <Button size="sm" onClick={openAddModal}>
-            + Add Service
-          </Button>
+          <div className="services-header-actions">
+            <Button size="sm" variant="secondary" onClick={() => { setShowNewCatForm(true); setNewCatName(""); }}>
+              + Category
+            </Button>
+            <Button size="sm" onClick={openAddModal}>
+              + Add Service
+            </Button>
+          </div>
         </div>
         {error && (
           <p className="text-sm" style={{ color: "var(--color-warning)" }}>
@@ -2783,15 +3590,30 @@ function ServicesScreen() {
         </div>
       )}
 
-      <Tabs
-        tabs={catNames.map((c) => ({
-          key: c,
-          label: c === "all" ? "All" : c,
-        }))}
-        activeKey={activeCat}
-        onChange={setActiveCat}
-      />
+      <div className="services-layout">
+        <aside className="services-category-rail" aria-label="Service categories">
+          {categoryTiles.map((category) => (
+            <button
+              key={category.key}
+              type="button"
+              className={`services-category-tile ${activeCat === category.key ? "services-category-tile--active" : ""}`}
+              onClick={() => setActiveCat(category.key)}
+            >
+              <strong>{category.label}</strong>
+              <small>{category.count} service{category.count === 1 ? "" : "s"}</small>
+            </button>
+          ))}
+          <button
+            type="button"
+            className="services-category-tile services-category-tile--add"
+            onClick={() => { setShowNewCatForm(true); setNewCatName(""); }}
+          >
+            <strong>+ Category</strong>
+            <small>Add new group</small>
+          </button>
+        </aside>
 
+        <section className="services-results">
       {filtered.length === 0 ? (
         <EmptyState
           icon="💅"
@@ -2858,6 +3680,8 @@ function ServicesScreen() {
           ))}
         </div>
       )}
+        </section>
+      </div>
 
       {/* Add / Edit Modal */}
       <Modal
@@ -2884,36 +3708,16 @@ function ServicesScreen() {
           onChange={(e) => setFormName(e.target.value)}
           placeholder="e.g. Classic Manicure"
         />
-        <div style={{ display: "flex", gap: "var(--space-2)", alignItems: "flex-end" }}>
-          <div style={{ flex: 1 }}>
-            <Select
-              label="Category"
-              value={formCategoryId}
-              onChange={(e) => setFormCategoryId(e.target.value)}
-              options={categories.map((c) => ({
-                value: c.id,
-                label: c.name,
-              }))}
-              placeholder="Select a category"
-            />
-          </div>
-          <Button size="sm" variant="ghost" onClick={() => { setShowNewCatForm(true); setNewCatName(""); }} type="button" style={{ marginBottom: "2px" }}>
+        <div className="service-form-picker-row">
+          <span className="field__label">Category</span>
+          <button className="service-form-picker" type="button" onClick={() => setShowCategoryPicker(true)}>
+            <strong>{selectedFormCategory?.name ?? "Choose category"}</strong>
+            <small>Tap to change</small>
+          </button>
+          <Button size="sm" variant="ghost" onClick={() => { setShowNewCatForm(true); setNewCatName(""); }} type="button">
             + New
           </Button>
         </div>
-        {showNewCatForm && (
-          <div style={{ display: "flex", gap: "var(--space-2)", alignItems: "flex-end", marginBottom: "var(--space-2)" }}>
-            <Input
-              label="New Category Name"
-              value={newCatName}
-              onChange={(e) => setNewCatName(e.target.value)}
-              placeholder="e.g. Waxing"
-            />
-            <Button size="sm" onClick={handleAddCategory} loading={addingCat} disabled={!newCatName.trim()}>
-              Save
-            </Button>
-          </div>
-        )}
         <AmountInput
           label="Price"
           valueCents={(() => {
@@ -2951,6 +3755,58 @@ function ServicesScreen() {
           </p>
         )}
       </Modal>
+
+      <Modal open={showCategoryPicker} onClose={() => setShowCategoryPicker(false)} title="Choose Category" className="service-picker-modal">
+        <div className="service-category-picker-grid">
+          {categories.map((category) => (
+            <button
+              key={category.id}
+              type="button"
+              className={`service-category-picker-tile ${formCategoryId === category.id ? "service-category-picker-tile--selected" : ""}`}
+              onClick={() => {
+                setFormCategoryId(category.id);
+                setShowCategoryPicker(false);
+              }}
+            >
+              <strong>{category.name}</strong>
+              <small>{services.filter((service) => service.categoryId === category.id).length} services</small>
+            </button>
+          ))}
+          <button
+            type="button"
+            className="service-category-picker-tile service-category-picker-tile--add"
+            onClick={() => {
+              setShowCategoryPicker(false);
+              setShowNewCatForm(true);
+              setNewCatName("");
+            }}
+          >
+            <strong>+ New</strong>
+            <small>Add category</small>
+          </button>
+        </div>
+      </Modal>
+
+      <Modal
+        open={showNewCatForm}
+        onClose={() => setShowNewCatForm(false)}
+        title="Add Category"
+        className="service-picker-modal service-category-create-modal"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setShowNewCatForm(false)}>Cancel</Button>
+            <Button onClick={handleAddCategory} loading={addingCat} disabled={!newCatName.trim()}>Save Category</Button>
+          </>
+        }
+      >
+        <Input
+          label="Category Name"
+          value={newCatName}
+          onChange={(e) => setNewCatName(e.target.value)}
+          placeholder="e.g. Waxing"
+          autoFocus
+        />
+      </Modal>
     </>
   );
 }
@@ -2959,7 +3815,11 @@ function ServicesScreen() {
    Workers Management
    ════════════════════════════════════════ */
 
-function WorkersScreen() {
+function WorkersScreen({
+  onOpenReportsForWorker,
+}: {
+  onOpenReportsForWorker: (workerId: string, report?: WorkerReportKey) => void;
+}) {
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -2972,6 +3832,7 @@ function WorkersScreen() {
   const [formEmail, setFormEmail] = useState("");
   const [formPhone, setFormPhone] = useState("");
   const [formCommissionText, setFormCommissionText] = useState("60");
+  const [formPin, setFormPin] = useState("");
   const [formError, setFormError] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -2998,6 +3859,7 @@ function WorkersScreen() {
     setFormEmail("");
     setFormPhone("");
     setFormCommissionText("60");
+    setFormPin("");
     setFormError("");
     setEditingWorker(null);
     setShowAddModal(true);
@@ -3009,6 +3871,7 @@ function WorkersScreen() {
     setFormEmail(w.user?.email ?? "");
     setFormPhone(w.user?.phone ?? "");
     setFormCommissionText(String(Math.round(w.commissionRate * 100)));
+    setFormPin("");
     setFormError("");
     setEditingWorker(w);
     setShowAddModal(true);
@@ -3016,31 +3879,27 @@ function WorkersScreen() {
 
   const handleSave = async () => {
     setFormError("");
-    if (!formName.trim() && !editingWorker) {
-      setFormError("Name is required.");
-      return;
-    }
-    const commissionRate = parseFloat(formCommissionText) / 100;
-    if (isNaN(commissionRate) || commissionRate < 0 || commissionRate > 1) {
-      setFormError("Commission rate must be between 0 and 100.");
+    const payload = buildWorkerSavePayload({
+      mode: editingWorker ? "edit" : "create",
+      name: formName,
+      displayName: formDisplayName,
+      email: formEmail,
+      phone: formPhone,
+      commissionText: formCommissionText,
+      pin: formPin,
+    });
+    if (!payload.ok) {
+      setFormError(payload.error);
       return;
     }
 
     setSaving(true);
     try {
-      if (editingWorker) {
-        await updateWorker(editingWorker.id, {
-          displayName: formDisplayName.trim() || undefined,
-          commissionRate,
-        });
+      if (payload.kind === "update") {
+        if (!editingWorker) return;
+        await updateWorker(editingWorker.id, payload.data);
       } else {
-        await createWorker({
-          name: formName.trim(),
-          displayName: formDisplayName.trim() || undefined,
-          email: formEmail.trim() || undefined,
-          phone: formPhone.trim() || undefined,
-          commissionRate,
-        });
+        await createWorker(payload.data);
       }
       setShowAddModal(false);
       await load();
@@ -3147,6 +4006,29 @@ function WorkersScreen() {
                   </div>
                 )}
               </div>
+              <div className="mgmt-card__actions mgmt-card__actions--reports">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => onOpenReportsForWorker(w.id)}
+                >
+                  View Earnings
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => onOpenReportsForWorker(w.id, "sales")}
+                >
+                  Sales
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => onOpenReportsForWorker(w.id, "turns")}
+                >
+                  Turns
+                </Button>
+              </div>
               <div className="mgmt-card__actions">
                 <Button
                   size="sm"
@@ -3239,6 +4121,16 @@ function WorkersScreen() {
           min={0}
           max={100}
         />
+        <Input
+          label={editingWorker ? "New Worker PIN (optional)" : "Worker PIN"}
+          type="password"
+          value={formPin}
+          onChange={(e) => setFormPin(e.target.value)}
+          placeholder={editingWorker ? "Leave blank to keep current PIN" : "4-6 digits"}
+          inputMode="numeric"
+          pattern="[0-9]*"
+          maxLength={6}
+        />
         {formError && (
           <p className="field__error" style={{ marginTop: "var(--space-2)" }}>
             {formError}
@@ -3253,22 +4145,96 @@ function WorkersScreen() {
    Reports
    ════════════════════════════════════════ */
 
-function ReportsScreen() {
-  const [activeReport, setActiveReport] = useState("sales");
-  const [startDate, setStartDate] = useState(() => {
-    return toDateInputValue(new Date());
-  });
-  const [endDate, setEndDate] = useState(() => {
-    return toDateInputValue(new Date());
-  });
-  const [selectedWorkerId, setSelectedWorkerId] = useState("");
+type ReportKey = "sales" | "workers" | "turns" | "payments" | "refunds" | "discounts" | "eod";
+type DatePreset = "today" | "yesterday" | "week" | "month" | "custom";
+
+function getReportPresetRange(preset: DatePreset) {
+  const today = new Date();
+  const start = new Date(today);
+  const end = new Date(today);
+
+  if (preset === "yesterday") {
+    start.setDate(today.getDate() - 1);
+    end.setDate(today.getDate() - 1);
+  } else if (preset === "week") {
+    start.setDate(today.getDate() - today.getDay());
+  } else if (preset === "month") {
+    start.setDate(1);
+  }
+
+  return { start: toDateInputValue(start), end: toDateInputValue(end) };
+}
+
+function formatDateTime(value: string | null) {
+  return value ? new Date(value).toLocaleString() : "-";
+}
+
+function formatCommissionRates(rates: number[], fallbackRate: number) {
+  const source = rates.length > 0 ? rates : [fallbackRate];
+  return source.map((rate) => `${Math.round(rate * 100)}%`).join(", ");
+}
+
+function formatDiscountValue(discount: DiscountReportRow) {
+  if (discount.amountCents > 0) return formatMoney(discount.amountCents);
+  if (discount.percent == null) return discount.type;
+
+  const percent = Number(discount.percent);
+  return Number.isFinite(percent) ? `${Math.round(percent * 100)}%` : String(discount.percent);
+}
+
+const reportTypeOptions: { key: ReportKey; label: string; icon: string; description: string }[] = [
+  { key: "sales", label: "Sales", icon: "Sales", description: "Tickets, services, tips, and collected totals" },
+  { key: "workers", label: "Workers", icon: "Staff", description: "Commission, tips, and total worker pay" },
+  { key: "turns", label: "Turns", icon: "Turns", description: "Turn detail, completion, and duration" },
+  { key: "payments", label: "Payments", icon: "Pay", description: "Approved payments by method and provider" },
+  { key: "refunds", label: "Refunds", icon: "Back", description: "Refund count and refund totals" },
+  { key: "discounts", label: "Discounts", icon: "Deal", description: "Discount usage by ticket and service" },
+  { key: "eod", label: "End of Day", icon: "EOD", description: "Closeout totals and reconciliation" },
+];
+
+const datePresetOptions: { key: DatePreset; label: string; description: string }[] = [
+  { key: "today", label: "Today", description: "Current business day" },
+  { key: "yesterday", label: "Yesterday", description: "Previous business day" },
+  { key: "week", label: "This week", description: "Sunday through today" },
+  { key: "month", label: "This month", description: "Month-to-date" },
+  { key: "custom", label: "Custom range", description: "Choose start and end dates" },
+];
+
+function workerDisplayName(worker: Worker) {
+  return worker.displayName || worker.user?.name || "Worker";
+}
+
+function ReportsScreen({
+  initialReport,
+  initialWorkerId,
+}: {
+  initialReport?: WorkerReportTarget["report"];
+  initialWorkerId?: string;
+}) {
+  const [activeReport, setActiveReport] = useState<ReportKey>(initialReport ?? "sales");
+  const [datePreset, setDatePreset] = useState<DatePreset>("today");
+  const [startDate, setStartDate] = useState(() => toDateInputValue(new Date()));
+  const [endDate, setEndDate] = useState(() => toDateInputValue(new Date()));
+  const [selectedWorkerId, setSelectedWorkerId] = useState(initialWorkerId ?? "");
+  const [selectedPaymentMethod, setSelectedPaymentMethod] = useState("");
+  const [reportPickerOpen, setReportPickerOpen] = useState(false);
+  const [datePickerOpen, setDatePickerOpen] = useState(false);
+  const [workerPickerOpen, setWorkerPickerOpen] = useState(false);
+  const [paymentPickerOpen, setPaymentPickerOpen] = useState(false);
   const [reportWorkers, setReportWorkers] = useState<Worker[]>([]);
   const [loading, setLoading] = useState(false);
   const [reportError, setReportError] = useState("");
   const [salesSummary, setSalesSummary] = useState<SalesReportSummary | null>(null);
   const [salesTickets, setSalesTickets] = useState<SalesReportTicket[]>([]);
-  const [workerEarnings, setWorkerEarnings] = useState<{ workerId: string; name: string; services: number; netSalesCents: number; commissionCents: number; tipsCents: number; totalPayCents: number }[]>([]);
+  const [selectedTicket, setSelectedTicket] = useState<SalesReportTicket | null>(null);
+  const [workerEarnings, setWorkerEarnings] = useState<WorkerEarningsRow[]>([]);
   const [turnDetails, setTurnDetails] = useState<TurnDetail[]>([]);
+  const [paymentSummary, setPaymentSummary] = useState<PaymentReportSummary | null>(null);
+  const [paymentRows, setPaymentRows] = useState<PaymentReportRow[]>([]);
+  const [refundSummary, setRefundSummary] = useState<{ refundTotalCents: number; refundCount: number } | null>(null);
+  const [refundRows, setRefundRows] = useState<RefundReportRow[]>([]);
+  const [discountSummary, setDiscountSummary] = useState<{ discountTotalCents: number; discountCount: number } | null>(null);
+  const [discountRows, setDiscountRows] = useState<DiscountReportRow[]>([]);
   const [eodData, setEodData] = useState<{
     grossServiceSalesCents: number;
     discountTotalCents: number;
@@ -3279,21 +4245,35 @@ function ReportsScreen() {
     cardTotalCents: number;
     giftCardTotalCents: number;
     workerCommissionPayoutCents: number;
+    workerTipsPayoutCents?: number;
     businessShareCents: number;
     totalPayCents?: number;
+    totalCollectedCents: number;
   } | null>(null);
 
+  const dateRangeError = startDate && endDate && endDate < startDate
+    ? "End date must be on or after the start date."
+    : "";
+  const supportsPaymentFilter = activeReport === "sales" || activeReport === "payments";
   const reportParams = {
     start: startDate ? `${startDate}T00:00:00` : undefined,
     end: endDate ? `${addDaysToDateInput(endDate, 1)}T00:00:00` : undefined,
     workerId: selectedWorkerId || undefined,
+    paymentMethod: supportsPaymentFilter && selectedPaymentMethod ? selectedPaymentMethod : undefined,
   };
 
   const clearReportData = () => {
     setSalesSummary(null);
     setSalesTickets([]);
+    setSelectedTicket(null);
     setWorkerEarnings([]);
     setTurnDetails([]);
+    setPaymentSummary(null);
+    setPaymentRows([]);
+    setRefundSummary(null);
+    setRefundRows([]);
+    setDiscountSummary(null);
+    setDiscountRows([]);
     setEodData(null);
   };
 
@@ -3302,62 +4282,92 @@ function ReportsScreen() {
     setReportError(error instanceof Error ? error.message : "Failed to load report data.");
   };
 
-  const loadSales = async () => {
+  const runReportLoad = async (loader: () => Promise<void>) => {
+    if (dateRangeError) {
+      clearReportData();
+      setReportError(dateRangeError);
+      return;
+    }
+
     setLoading(true);
     setReportError("");
+    try {
+      await loader();
+    } catch (error) {
+      setReportFailure(error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadSales = () => runReportLoad(async () => {
     setSalesSummary(null);
     setSalesTickets([]);
-    try {
-      const data = await fetchSalesReport(reportParams);
-      setSalesSummary(data.summary);
-      setSalesTickets(data.sales);
-    } catch (error) { setReportFailure(error); }
-    finally { setLoading(false); }
-  };
+    const data = await fetchSalesReport(reportParams);
+    setSalesSummary(data.summary);
+    setSalesTickets(data.sales);
+  });
 
-  const loadWorkers = async () => {
-    setLoading(true);
-    setReportError("");
+  const loadWorkers = () => runReportLoad(async () => {
     setWorkerEarnings([]);
-    try {
-      const data = await fetchWorkerEarnings(reportParams);
-      setWorkerEarnings(data.workers);
-    } catch (error) { setReportFailure(error); }
-    finally { setLoading(false); }
-  };
+    const data = await fetchWorkerEarnings(reportParams);
+    setWorkerEarnings(data.workers);
+  });
 
-  const loadTurns = async () => {
-    setLoading(true);
-    setReportError("");
+  const loadTurns = () => runReportLoad(async () => {
     setTurnDetails([]);
-    try {
-      const data = await fetchTurnDetail(reportParams);
-      setTurnDetails(data.turns);
-    } catch (error) { setReportFailure(error); }
-    finally { setLoading(false); }
-  };
+    const data = await fetchTurnDetail(reportParams);
+    setTurnDetails(data.turns);
+  });
 
-  const loadEod = async () => {
-    setLoading(true);
-    setReportError("");
+  const loadPayments = () => runReportLoad(async () => {
+    setPaymentSummary(null);
+    setPaymentRows([]);
+    const data = await fetchPaymentReport(reportParams);
+    setPaymentSummary(data.summary);
+    setPaymentRows(data.payments);
+  });
+
+  const loadRefunds = () => runReportLoad(async () => {
+    setRefundSummary(null);
+    setRefundRows([]);
+    const data = await fetchRefundReport(reportParams);
+    setRefundSummary(data.summary);
+    setRefundRows(data.refunds);
+  });
+
+  const loadDiscounts = () => runReportLoad(async () => {
+    setDiscountSummary(null);
+    setDiscountRows([]);
+    const data = await fetchDiscountReport(reportParams);
+    setDiscountSummary(data.summary);
+    setDiscountRows(data.discounts);
+  });
+
+  const loadEod = () => runReportLoad(async () => {
     setEodData(null);
-    try {
-      const data = await fetchEndOfDayReport(reportParams);
-      setEodData(data);
-    } catch (error) { setReportFailure(error); }
-    finally { setLoading(false); }
-  };
+    const data = await fetchEndOfDayReport(reportParams);
+    setEodData(data);
+  });
 
   const refresh = () => {
-    if (activeReport === "sales") loadSales();
-    else if (activeReport === "workers") loadWorkers();
-    else if (activeReport === "turns") loadTurns();
-    else if (activeReport === "eod") loadEod();
+    if (activeReport === "sales") void loadSales();
+    else if (activeReport === "workers") void loadWorkers();
+    else if (activeReport === "turns") void loadTurns();
+    else if (activeReport === "payments") void loadPayments();
+    else if (activeReport === "refunds") void loadRefunds();
+    else if (activeReport === "discounts") void loadDiscounts();
+    else if (activeReport === "eod") void loadEod();
   };
 
   useEffect(() => {
     refresh();
-  }, [activeReport, startDate, endDate, selectedWorkerId]);
+  }, [activeReport, startDate, endDate, selectedWorkerId, selectedPaymentMethod]);
+
+  useEffect(() => {
+    if (initialReport) setActiveReport(initialReport);
+    if (initialWorkerId !== undefined) setSelectedWorkerId(initialWorkerId);
+  }, [initialReport, initialWorkerId]);
 
   useEffect(() => {
     const loadReportWorkers = async () => {
@@ -3371,17 +4381,88 @@ function ReportsScreen() {
     void loadReportWorkers();
   }, []);
 
+  const applyDatePreset = (preset: DatePreset) => {
+    setDatePreset(preset);
+    if (preset === "custom") return;
+
+    const range = getReportPresetRange(preset);
+    setStartDate(range.start);
+    setEndDate(range.end);
+  };
+
+  const handleStartDateChange = (value: string) => {
+    setDatePreset("custom");
+    setStartDate(value);
+  };
+
+  const handleEndDateChange = (value: string) => {
+    setDatePreset("custom");
+    setEndDate(value);
+  };
+
   const reportLabel = startDate && endDate
     ? startDate === endDate ? startDate : `${startDate} - ${endDate}`
-    : "Today";
-  const selectedWorkerName = reportWorkers.find((worker) => worker.id === selectedWorkerId)?.displayName;
-  const filterDescription = selectedWorkerName
-    ? `${reportLabel} for ${selectedWorkerName}`
-    : reportLabel;
-  const workerOptions = [
-    { value: "", label: "All workers" },
-    ...reportWorkers.map((worker) => ({ value: worker.id, label: worker.displayName })),
+    : "Selected range";
+  const selectedWorker = reportWorkers.find((worker) => worker.id === selectedWorkerId);
+  const selectedWorkerName = selectedWorker ? workerDisplayName(selectedWorker) : "";
+  const selectedPaymentLabel = selectedPaymentMethod ? methodLabel(selectedPaymentMethod) : "";
+  const activeReportLabel = reportTypeOptions.find((option) => option.key === activeReport)?.label ?? "Report";
+  const datePresetLabel = datePresetOptions.find((option) => option.key === datePreset)?.label ?? "Custom";
+  const filterDescription = [
+    reportLabel,
+    selectedWorkerName ? `for ${selectedWorkerName}` : "All workers",
+    selectedPaymentLabel ? `paid by ${selectedPaymentLabel}` : supportsPaymentFilter ? "All payments" : "",
+  ].filter(Boolean).join(" · ");
+  const paymentOptions = [
+    { value: "", label: "All methods", icon: "All" },
+    { value: "cash", label: "Cash", icon: "Cash" },
+    { value: "card", label: "Card", icon: "Card" },
+    { value: "gift_card", label: "Gift Card", icon: "Gift" },
   ];
+  const workerTotals = workerEarnings.reduce((totals, worker) => ({
+    services: totals.services + worker.services,
+    netSalesCents: totals.netSalesCents + worker.netSalesCents,
+    commissionCents: totals.commissionCents + worker.commissionCents,
+    tipsCents: totals.tipsCents + worker.tipsCents,
+    totalPayCents: totals.totalPayCents + worker.totalPayCents,
+  }), { services: 0, netSalesCents: 0, commissionCents: 0, tipsCents: 0, totalPayCents: 0 });
+  const completedTurns = turnDetails.filter((turn) => turn.status === "completed").length;
+  const skippedTurns = turnDetails.filter((turn) => turn.status === "skipped").length;
+  const durations = turnDetails
+    .map((turn) => turn.durationMinutes)
+    .filter((minutes): minutes is number => typeof minutes === "number");
+  const avgDuration = durations.length > 0
+    ? Math.round(durations.reduce((sum, minutes) => sum + minutes, 0) / durations.length)
+    : 0;
+  const selectedTicketWorkerBreakdown = selectedTicket
+    ? Object.values(selectedTicket.services.reduce<Record<string, {
+        workerId: string;
+        workerName: string;
+        services: string[];
+        netSalesCents: number;
+        commissionCents: number;
+        tipsCents: number;
+        payCents: number;
+      }>>((workersById, service) => {
+        const existing = workersById[service.workerId] ?? {
+          workerId: service.workerId,
+          workerName: service.workerName,
+          services: [],
+          netSalesCents: 0,
+          commissionCents: 0,
+          tipsCents: 0,
+          payCents: 0,
+        };
+        existing.services.push(service.serviceName);
+        existing.netSalesCents += service.finalServiceCents;
+        existing.commissionCents += service.commissionCents;
+        existing.tipsCents += service.tipsCents;
+        existing.payCents += service.payCents;
+        workersById[service.workerId] = existing;
+        return workersById;
+      }, {}))
+    : [];
+
   return (
     <>
       <header>
@@ -3392,87 +4473,167 @@ function ReportsScreen() {
         </div>
       </header>
 
-      {/* Date range picker */}
-      <div style={{ display: "flex", gap: "var(--space-2)", marginBottom: "var(--space-4)", alignItems: "flex-end", flexWrap: "wrap" }}>
-        <Input label="Start" type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
-        <Input label="End" type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
-        <Select
-          label="Worker"
-          value={selectedWorkerId}
-          onChange={(e) => setSelectedWorkerId(e.target.value)}
-          options={workerOptions}
-          style={{ minWidth: "180px" }}
-        />
-        <span style={{ paddingBottom: "var(--space-2)", fontSize: "var(--text-sm)", color: "var(--color-text-muted)" }}>
-          {filterDescription}
-        </span>
+      <div className="report-ipad-toolbar">
+        <button className="report-filter-card report-filter-card--primary" type="button" onClick={() => setReportPickerOpen(true)}>
+          <span className="report-filter-card__label">Report</span>
+          <strong>{activeReportLabel}</strong>
+          <small>Tap to switch report</small>
+        </button>
+        <button className="report-filter-card" type="button" onClick={() => setDatePickerOpen(true)}>
+          <span className="report-filter-card__label">Date</span>
+          <strong>{datePreset === "custom" ? reportLabel : datePresetLabel}</strong>
+          <small>{reportLabel}</small>
+        </button>
+        <button className="report-filter-card" type="button" onClick={() => setWorkerPickerOpen(true)}>
+          <span className="report-filter-card__label">Worker</span>
+          <strong>{selectedWorkerName || "All workers"}</strong>
+          <small>{selectedWorkerId ? "Filtered" : "Whole salon"}</small>
+        </button>
+        {supportsPaymentFilter && (
+          <button className="report-filter-card" type="button" onClick={() => setPaymentPickerOpen(true)}>
+            <span className="report-filter-card__label">Payment</span>
+            <strong>{selectedPaymentLabel || "All methods"}</strong>
+            <small>{selectedPaymentMethod ? "Filtered" : "Cash, card, gift card"}</small>
+          </button>
+        )}
       </div>
 
-      <Tabs
-        tabs={[
-          { key: "sales", label: "Sales" },
-          { key: "workers", label: "Workers" },
-          { key: "turns", label: "Turns" },
-          { key: "eod", label: "End of Day" },
-        ]}
-        activeKey={activeReport}
-        onChange={setActiveReport}
-      />
+      <div className="report-type-grid" role="tablist" aria-label="Report type">
+        {reportTypeOptions.map((option) => (
+          <button
+            key={option.key}
+            type="button"
+            role="tab"
+            aria-selected={activeReport === option.key}
+            className={`report-type-card ${activeReport === option.key ? "report-type-card--active" : ""}`}
+            onClick={() => setActiveReport(option.key)}
+          >
+            <span className="report-type-card__icon">{option.icon}</span>
+            <strong>{option.label}</strong>
+          </button>
+        ))}
+      </div>
+
+      <p className="report-filters__summary">{filterDescription}</p>
+
+      <Modal open={reportPickerOpen} onClose={() => setReportPickerOpen(false)} title="Choose Report" className="report-picker-modal">
+        <div className="report-choice-grid">
+          {reportTypeOptions.map((option) => (
+            <button
+              key={option.key}
+              type="button"
+              className={`report-choice-card ${activeReport === option.key ? "report-choice-card--selected" : ""}`}
+              onClick={() => {
+                setActiveReport(option.key);
+                setReportPickerOpen(false);
+              }}
+            >
+              <span className="report-choice-card__icon">{option.icon}</span>
+              <span>
+                <strong>{option.label}</strong>
+                <small>{option.description}</small>
+              </span>
+            </button>
+          ))}
+        </div>
+      </Modal>
+
+      <Modal open={datePickerOpen} onClose={() => setDatePickerOpen(false)} title="Choose Date Range" className="report-picker-modal">
+        <div className="report-choice-grid report-choice-grid--dates">
+          {datePresetOptions.map((option) => (
+            <button
+              key={option.key}
+              type="button"
+              className={`report-choice-card ${datePreset === option.key ? "report-choice-card--selected" : ""}`}
+              onClick={() => {
+                applyDatePreset(option.key);
+                if (option.key !== "custom") setDatePickerOpen(false);
+              }}
+            >
+              <span>
+                <strong>{option.label}</strong>
+                <small>{option.description}</small>
+              </span>
+            </button>
+          ))}
+        </div>
+        <div className="report-date-custom">
+          <Input label="Start" type="date" value={startDate} onChange={(event) => handleStartDateChange(event.target.value)} error={dateRangeError} />
+          <Input label="End" type="date" value={endDate} onChange={(event) => handleEndDateChange(event.target.value)} />
+          <Button fullWidth onClick={() => setDatePickerOpen(false)} disabled={Boolean(dateRangeError)}>
+            Apply Date Range
+          </Button>
+        </div>
+      </Modal>
+
+      <Modal open={workerPickerOpen} onClose={() => setWorkerPickerOpen(false)} title="Choose Worker" className="report-picker-modal report-worker-picker-modal">
+        <div className="report-choice-list report-choice-list--workers">
+          <button
+            type="button"
+            className={`report-choice-card report-worker-choice-card ${selectedWorkerId === "" ? "report-choice-card--selected" : ""}`}
+            onClick={() => {
+              setSelectedWorkerId("");
+              setWorkerPickerOpen(false);
+            }}
+          >
+            <span>
+              <strong>All</strong>
+              <small>workers</small>
+            </span>
+          </button>
+          {reportWorkers.map((worker) => (
+            <button
+              key={worker.id}
+              type="button"
+              className={`report-choice-card report-worker-choice-card ${selectedWorkerId === worker.id ? "report-choice-card--selected" : ""}`}
+              onClick={() => {
+                setSelectedWorkerId(worker.id);
+                setWorkerPickerOpen(false);
+              }}
+            >
+              <span>
+                <strong>{workerDisplayName(worker)}</strong>
+                <small>{Math.round(worker.commissionRate * 100)}% · {worker.currentStatus.replace(/_/g, " ")}</small>
+              </span>
+            </button>
+          ))}
+        </div>
+      </Modal>
+
+      <Modal open={paymentPickerOpen} onClose={() => setPaymentPickerOpen(false)} title="Choose Payment Method" className="report-picker-modal">
+        <div className="report-choice-grid report-choice-grid--payments">
+          {paymentOptions.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={`report-choice-card ${selectedPaymentMethod === option.value ? "report-choice-card--selected" : ""}`}
+              onClick={() => {
+                setSelectedPaymentMethod(option.value);
+                setPaymentPickerOpen(false);
+              }}
+            >
+              <span className="report-choice-card__icon">{option.icon}</span>
+              <span><strong>{option.label}</strong></span>
+            </button>
+          ))}
+        </div>
+      </Modal>
 
       {loading && <p className="text-muted text-sm my-2">Loading...</p>}
       {reportError && <p className="field__error my-2">{reportError}</p>}
 
-      {/* ── Turn Detail Report ── */}
-      {activeReport === "turns" && (
-        <Card padding="lg">
-          <div className="card__header">
-            <h2 className="card__title">Turn Detail — {reportLabel}</h2>
-            <Badge variant="info">{turnDetails.length} turns</Badge>
-          </div>
-          {turnDetails.length === 0 ? (
-            <EmptyState icon="📋" title="No turns found" description="No turn data for the selected date range." />
-          ) : (
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Worker</th><th>Customer</th><th>Services</th><th>Status</th>
-                    <th>Total</th><th>Commission</th><th>Tips</th><th>Pay</th><th>Duration</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {turnDetails.map((t) => (
-                    <tr key={t.id}>
-                      <td><strong>{t.workerName}</strong></td>
-                      <td>{t.customerName}</td>
-                      <td style={{ maxWidth: "150px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.services || "—"}</td>
-                      <td><StatusPill status={t.status} /></td>
-                      <td>{formatMoney(t.itemTotalCents)}</td>
-                      <td>{formatMoney(t.commissionCents)}</td>
-                      <td>{formatMoney(t.tipsCents)}</td>
-                      <td><strong>{formatMoney(t.totalPayCents)}</strong></td>
-                      <td>{t.durationMinutes != null ? `${t.durationMinutes}m` : "—"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </Card>
-      )}
-
-      {/* ── Sales ── */}
       {activeReport === "sales" && salesSummary && (
-        <>
+        <section className="report-section">
           <div className="report-summary">
-            <StatCard label="Service Total" value={formatMoney(salesSummary.netServiceSalesCents)} />
-            <StatCard label="Commission" value={formatMoney(salesSummary.workerCommissionPayoutCents)} />
+            <StatCard label="Gross Service" value={formatMoney(salesSummary.grossServiceSalesCents)} />
+            <StatCard label="Discounts" value={formatMoney(salesSummary.discountTotalCents)} />
+            <StatCard label="Net Service" value={formatMoney(salesSummary.netServiceSalesCents)} />
             <StatCard label="Tips" value={formatMoney(salesSummary.tipTotalCents)} />
-            <StatCard label="Pay" value={formatMoney(salesSummary.totalPayCents)} />
+            <StatCard label="Worker Pay" value={formatMoney(salesSummary.totalPayCents)} />
             <StatCard label="Collected" value={formatMoney(salesSummary.totalCollectedCents)} />
           </div>
           {salesTickets.length === 0 ? (
-            <EmptyState icon="📊" title="No paid tickets" description={`No paid ticket data found for ${filterDescription}.`} />
+            <EmptyState icon="-" title="No paid tickets" description={`No paid ticket data found for ${filterDescription}.`} />
           ) : (
             <div className="report-ticket-list">
               {salesTickets.map((ticket) => (
@@ -3481,16 +4642,21 @@ function ReportsScreen() {
                     <div>
                       <h2 className="card__title">{ticket.customerName}</h2>
                       <p className="text-muted text-sm">
-                        {ticket.completedAt ? new Date(ticket.completedAt).toLocaleString() : "Completed sale"} · {ticket.paymentMethods.map(methodLabel).join(", ") || "No approved payment"}
+                        {ticket.completedAt ? new Date(ticket.completedAt).toLocaleString() : "Completed sale"} | {ticket.paymentMethods.map(methodLabel).join(", ") || "No approved payment"}
                       </p>
                     </div>
-                    <Badge variant="success">{formatMoney(ticket.totals.collectedCents)}</Badge>
+                    <div className="report-ticket__header-actions">
+                      <Badge variant="success">{formatMoney(ticket.totals.collectedCents)}</Badge>
+                      <Button size="sm" variant="secondary" onClick={() => setSelectedTicket(ticket)}>
+                        View Ticket
+                      </Button>
+                    </div>
                   </div>
                   <div className="table-wrap">
                     <table className="report-table">
                       <thead>
                         <tr>
-                          <th>Service</th><th>Worker</th><th>Price</th><th>Discount</th><th>Paid</th><th>Commission</th><th>Tips</th><th>Pay</th>
+                          <th>Service</th><th>Worker</th><th>Price</th><th>Discount</th><th>Paid</th><th>Commission</th><th>Tips</th><th>Pay</th><th></th>
                         </tr>
                       </thead>
                       <tbody>
@@ -3499,11 +4665,16 @@ function ReportsScreen() {
                             <td><strong>{service.serviceName}</strong></td>
                             <td>{service.workerName}</td>
                             <td>{formatMoney(service.priceCents)}</td>
-                            <td>{service.discountCents > 0 ? `-${formatMoney(service.discountCents)}` : "—"}</td>
+                            <td>{service.discountCents > 0 ? `-${formatMoney(service.discountCents)}` : "-"}</td>
                             <td>{formatMoney(service.finalServiceCents)}</td>
                             <td>{formatMoney(service.commissionCents)}</td>
                             <td>{formatMoney(service.tipsCents)}</td>
                             <td><strong>{formatMoney(service.payCents)}</strong></td>
+                            <td>
+                              <Button size="sm" variant="ghost" onClick={() => setSelectedTicket(ticket)}>
+                                Ticket
+                              </Button>
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -3514,91 +4685,359 @@ function ReportsScreen() {
                           <td><strong>{formatMoney(ticket.totals.commissionCents)}</strong></td>
                           <td><strong>{formatMoney(ticket.totals.tipsCents)}</strong></td>
                           <td><strong>{formatMoney(ticket.totals.payCents)}</strong></td>
+                          <td></td>
                         </tr>
                       </tfoot>
                     </table>
                   </div>
                 </Card>
               ))}
-              <Card padding="lg" className="report-ticket-total">
-                <div className="report-ticket-total__grid">
-                  <span><strong>All tickets</strong></span>
-                  <span>Service {formatMoney(salesSummary.netServiceSalesCents)}</span>
-                  <span>Commission {formatMoney(salesSummary.workerCommissionPayoutCents)}</span>
-                  <span>Tips {formatMoney(salesSummary.tipTotalCents)}</span>
-                  <span>Pay {formatMoney(salesSummary.totalPayCents)}</span>
-                  <span>Collected {formatMoney(salesSummary.totalCollectedCents)}</span>
+            </div>
+          )}
+        </section>
+      )}
+
+      <Modal
+        open={selectedTicket !== null}
+        onClose={() => setSelectedTicket(null)}
+        title={selectedTicket ? `Ticket - ${selectedTicket.customerName}` : "Ticket"}
+        className="report-ticket-modal"
+      >
+        {selectedTicket && (
+          <div className="report-ticket-detail">
+            <section className="report-ticket-detail__hero">
+              <div>
+                <p className="eyebrow">Ticket detail</p>
+                <h2>{selectedTicket.customerName}</h2>
+                <p className="text-muted text-sm">
+                  {selectedTicket.completedAt ? new Date(selectedTicket.completedAt).toLocaleString() : "Completed sale"} · {selectedTicket.paymentMethods.map(methodLabel).join(", ") || "No approved payment"}
+                </p>
+              </div>
+              <div className="report-ticket-detail__collected">
+                <span>Collected</span>
+                <strong>{formatMoney(selectedTicket.totals.collectedCents)}</strong>
+              </div>
+            </section>
+
+            <div className="report-ticket-detail__body">
+              <section className="report-ticket-detail__panel report-ticket-detail__panel--services">
+                <div className="report-ticket-detail__section-header">
+                  <h3>Services</h3>
+                  <Badge variant="info">{selectedTicket.services.length}</Badge>
                 </div>
-              </Card>
-            </div>
-          )}
-        </>
-      )}
-      {activeReport === "sales" && !salesSummary && !loading && (
-        <EmptyState icon="📊" title="No sales data" description="Try adjusting the date range." />
-      )}
+                <div className="report-ticket-detail__services">
+                  {selectedTicket.services.map((service) => (
+                    <article key={service.id} className="report-ticket-detail__service-card">
+                      <div className="report-ticket-detail__service-title">
+                        <strong>{service.serviceName}</strong>
+                        <small>{service.workerName}</small>
+                      </div>
+                      <div className="report-ticket-detail__service-amounts">
+                        <div><span>Price</span><strong>{formatMoney(service.priceCents)}</strong></div>
+                        <div><span>Discount</span><strong>{service.discountCents > 0 ? `-${formatMoney(service.discountCents)}` : "-"}</strong></div>
+                        <div><span>Net</span><strong>{formatMoney(service.finalServiceCents)}</strong></div>
+                        <div><span>Tip</span><strong>{formatMoney(service.tipsCents)}</strong></div>
+                      </div>
 
-      {/* ── Worker Earnings ── */}
-      {activeReport === "workers" && (
-        <Card padding="lg">
-          <div className="card__header">
-            <h2 className="card__title">Worker Earnings — {reportLabel}</h2>
-          </div>
-          {workerEarnings.length === 0 ? (
-            <EmptyState icon="👤" title="No worker data" description="No sales recorded for workers in this period." />
-          ) : (
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr><th>Worker</th><th>Services</th><th>Net Sales</th><th>Commission</th><th>Tips</th><th>Total Pay</th></tr>
-                </thead>
-                <tbody>
-                  {workerEarnings.map((w) => (
-                    <tr key={w.workerId}>
-                      <td><strong>{w.name}</strong></td>
-                      <td>{w.services}</td>
-                      <td>{formatMoney(w.netSalesCents)}</td>
-                      <td>{formatMoney(w.commissionCents)}</td>
-                      <td>{formatMoney(w.tipsCents)}</td>
-                      <td><strong>{formatMoney(w.totalPayCents)}</strong></td>
-                    </tr>
+                    </article>
                   ))}
-                </tbody>
-              </table>
+                </div>
+              </section>
+
+              <aside className="report-ticket-detail__panel report-ticket-detail__panel--summary">
+                <h3>Summary</h3>
+                <div className="report-ticket-detail__totals">
+                  <div><span>Gross service</span><strong>{formatMoney(selectedTicket.totals.grossServiceCents)}</strong></div>
+                  <div><span>Discounts</span><strong>{selectedTicket.totals.discountCents > 0 ? `-${formatMoney(selectedTicket.totals.discountCents)}` : formatMoney(0)}</strong></div>
+                  <div><span>Net service</span><strong>{formatMoney(selectedTicket.totals.serviceCents)}</strong></div>
+                  <div><span>Tips</span><strong>{formatMoney(selectedTicket.totals.tipsCents)}</strong></div>
+                  <div className="report-ticket-detail__total-main"><span>Collected</span><strong>{formatMoney(selectedTicket.totals.collectedCents)}</strong></div>
+                  <div><span>Commission</span><strong>{formatMoney(selectedTicket.totals.commissionCents)}</strong></div>
+                  <div><span>Worker pay</span><strong>{formatMoney(selectedTicket.totals.payCents)}</strong></div>
+                  <div><span>Business share</span><strong>{formatMoney(Math.max(selectedTicket.totals.serviceCents - selectedTicket.totals.commissionCents, 0))}</strong></div>
+                </div>
+              </aside>
             </div>
-          )}
-        </Card>
+
+            <section className="report-ticket-detail__panel">
+              <div className="report-ticket-detail__section-header">
+                <h3>Worker Breakdown</h3>
+                <Badge variant="default">{selectedTicketWorkerBreakdown.length}</Badge>
+              </div>
+              <div className="report-ticket-detail__workers">
+                {selectedTicketWorkerBreakdown.map((worker) => (
+                  <article key={worker.workerId} className="report-ticket-detail__worker-card">
+                    <div>
+                      <strong>{worker.workerName}</strong>
+                      <small>{worker.services.join(", ")}</small>
+                    </div>
+                    <div><span>Net sales</span><strong>{formatMoney(worker.netSalesCents)}</strong></div>
+                    <div><span>Commission</span><strong>{formatMoney(worker.commissionCents)}</strong></div>
+                    <div><span>Tips</span><strong>{formatMoney(worker.tipsCents)}</strong></div>
+                    <div><span>Pay</span><strong>{formatMoney(worker.payCents)}</strong></div>
+                  </article>
+                ))}
+              </div>
+            </section>
+          </div>
+        )}
+      </Modal>
+
+      {activeReport === "sales" && !salesSummary && !loading && !reportError && (
+        <EmptyState icon="-" title="No sales data" description="Try adjusting the date range." />
       )}
 
-      {/* ── End of Day ── */}
-      {activeReport === "eod" && eodData && (
-        <>
+      {activeReport === "workers" && (
+        <section className="report-section">
           <div className="report-summary">
-            <StatCard label="Gross Sales" value={formatMoney(eodData.grossServiceSalesCents)} />
-            <StatCard label="Net Sales" value={formatMoney(eodData.netServiceSalesCents)} />
-            <StatCard label="Commission Payout" value={formatMoney(eodData.workerCommissionPayoutCents)} />
-            <StatCard label="Business Share" value={formatMoney(eodData.businessShareCents)} />
-            <StatCard label="Tips Paid" value={formatMoney(eodData.tipTotalCents)} />
-            <StatCard label="Cash" value={formatMoney(eodData.cashTotalCents)} />
-            <StatCard label="Card" value={formatMoney(eodData.cardTotalCents)} />
-            <StatCard label="Gift Card" value={formatMoney(eodData.giftCardTotalCents)} />
+            <StatCard label="Services" value={String(workerTotals.services)} />
+            <StatCard label="Net Sales" value={formatMoney(workerTotals.netSalesCents)} />
+            <StatCard label="Commission" value={formatMoney(workerTotals.commissionCents)} />
+            <StatCard label="Tips" value={formatMoney(workerTotals.tipsCents)} />
+            <StatCard label="Total Pay" value={formatMoney(workerTotals.totalPayCents)} />
           </div>
           <Card padding="lg">
-            <h2 className="card__title mb-2">End-of-Day Summary — {reportLabel}</h2>
-            <p className="text-muted text-sm">All transactions reconciled for the selected period.</p>
+            <div className="card__header">
+              <h2 className="card__title">Worker Earnings - {reportLabel}</h2>
+            </div>
+            {workerEarnings.length === 0 ? (
+              <EmptyState icon="-" title="No worker data" description="No sales recorded for workers in this period." />
+            ) : (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr><th>Worker</th><th>Services</th><th>Net Sales</th><th>Rate Snapshot</th><th>Commission</th><th>Tips</th><th>Total Pay</th></tr>
+                  </thead>
+                  <tbody>
+                    {workerEarnings.map((worker) => (
+                      <tr key={worker.workerId}>
+                        <td><strong>{worker.name}</strong></td>
+                        <td>{worker.services}</td>
+                        <td>{formatMoney(worker.netSalesCents)}</td>
+                        <td>{formatCommissionRates(worker.commissionRates, worker.commissionRate)}</td>
+                        <td>{formatMoney(worker.commissionCents)}</td>
+                        <td>{formatMoney(worker.tipsCents)}</td>
+                        <td><strong>{formatMoney(worker.totalPayCents)}</strong></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr>
+                      <td><strong>Total</strong></td>
+                      <td><strong>{workerTotals.services}</strong></td>
+                      <td><strong>{formatMoney(workerTotals.netSalesCents)}</strong></td>
+                      <td></td>
+                      <td><strong>{formatMoney(workerTotals.commissionCents)}</strong></td>
+                      <td><strong>{formatMoney(workerTotals.tipsCents)}</strong></td>
+                      <td><strong>{formatMoney(workerTotals.totalPayCents)}</strong></td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            )}
           </Card>
-        </>
+        </section>
       )}
-      {activeReport === "eod" && !eodData && !loading && (
-        <EmptyState icon="📊" title="No EOD data" description="Try adjusting the date range." />
+
+      {activeReport === "turns" && (
+        <section className="report-section">
+          <div className="report-summary">
+            <StatCard label="Turns" value={String(turnDetails.length)} />
+            <StatCard label="Completed" value={String(completedTurns)} />
+            <StatCard label="Skipped" value={String(skippedTurns)} />
+            <StatCard label="Avg Duration" value={avgDuration > 0 ? `${avgDuration}m` : "-"} />
+          </div>
+          <Card padding="lg">
+            <div className="card__header">
+              <h2 className="card__title">Turn Detail - {reportLabel}</h2>
+              <Badge variant="info">{turnDetails.length} turns</Badge>
+            </div>
+            {turnDetails.length === 0 ? (
+              <EmptyState icon="-" title="No turns found" description="No turn data for the selected date range." />
+            ) : (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Worker</th><th>Customer</th><th>Services</th><th>Status</th>
+                      <th>Total</th><th>Commission</th><th>Tips</th><th>Pay</th><th>Duration</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {turnDetails.map((turn) => (
+                      <tr key={turn.id}>
+                        <td><strong>{turn.workerName}</strong></td>
+                        <td>{turn.customerName}</td>
+                        <td className="report-cell--truncate">{turn.services || "-"}</td>
+                        <td><StatusPill status={turn.status} /></td>
+                        <td>{formatMoney(turn.itemTotalCents)}</td>
+                        <td>{formatMoney(turn.commissionCents)}</td>
+                        <td>{formatMoney(turn.tipsCents)}</td>
+                        <td><strong>{formatMoney(turn.totalPayCents)}</strong></td>
+                        <td>{turn.durationMinutes != null ? `${turn.durationMinutes}m` : "-"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Card>
+        </section>
+      )}
+
+      {activeReport === "payments" && paymentSummary && (
+        <section className="report-section">
+          <div className="report-summary">
+            <StatCard label="Cash" value={formatMoney(paymentSummary.cashTotalCents)} />
+            <StatCard label="Card" value={formatMoney(paymentSummary.cardTotalCents)} />
+            <StatCard label="Gift Card" value={formatMoney(paymentSummary.giftCardTotalCents)} />
+            <StatCard label="Other" value={formatMoney(paymentSummary.otherTotalCents)} />
+            <StatCard label="Approved Total" value={formatMoney(paymentSummary.totalApprovedCents)} />
+          </div>
+          <Card padding="lg">
+            <div className="card__header">
+              <h2 className="card__title">Payments - {reportLabel}</h2>
+              <Badge variant="info">{paymentRows.length} payments</Badge>
+            </div>
+            {paymentRows.length === 0 ? (
+              <EmptyState icon="-" title="No payments found" description="No backend-approved payments found for this period." />
+            ) : (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr><th>Time</th><th>Customer</th><th>Method</th><th>Provider</th><th>Status</th><th>Tip</th><th>Amount</th></tr>
+                  </thead>
+                  <tbody>
+                    {paymentRows.map((payment) => (
+                      <tr key={payment.id}>
+                        <td>{formatDateTime(payment.createdAt)}</td>
+                        <td>{payment.customerName}</td>
+                        <td>{methodLabel(payment.method)}</td>
+                        <td>{payment.provider ?? "-"}</td>
+                        <td><StatusPill status={payment.status} /></td>
+                        <td>{formatMoney(payment.tipCents)}</td>
+                        <td><strong>{formatMoney(payment.amountCents)}</strong></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Card>
+        </section>
+      )}
+
+      {activeReport === "refunds" && refundSummary && (
+        <section className="report-section">
+          <div className="report-summary">
+            <StatCard label="Refunds" value={String(refundSummary.refundCount)} />
+            <StatCard label="Refund Total" value={formatMoney(refundSummary.refundTotalCents)} />
+          </div>
+          <Card padding="lg">
+            <div className="card__header">
+              <h2 className="card__title">Refunds - {reportLabel}</h2>
+            </div>
+            {refundRows.length === 0 ? (
+              <EmptyState icon="-" title="No refunds found" description="No refunds recorded for this period." />
+            ) : (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr><th>Time</th><th>Customer</th><th>Payment</th><th>Reason</th><th>Approved By</th><th>Amount</th></tr>
+                  </thead>
+                  <tbody>
+                    {refundRows.map((refund) => (
+                      <tr key={refund.id}>
+                        <td>{formatDateTime(refund.createdAt)}</td>
+                        <td>{refund.customerName}</td>
+                        <td>{refund.paymentMethod ? methodLabel(refund.paymentMethod) : "-"}</td>
+                        <td>{refund.reason ?? "-"}</td>
+                        <td>{refund.approvedByUserId ?? "-"}</td>
+                        <td><strong>{formatMoney(refund.amountCents)}</strong></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Card>
+        </section>
+      )}
+
+      {activeReport === "discounts" && discountSummary && (
+        <section className="report-section">
+          <div className="report-summary">
+            <StatCard label="Discounts" value={String(discountSummary.discountCount)} />
+            <StatCard label="Discount Total" value={formatMoney(discountSummary.discountTotalCents)} />
+          </div>
+          <Card padding="lg">
+            <div className="card__header">
+              <h2 className="card__title">Discounts - {reportLabel}</h2>
+            </div>
+            {discountRows.length === 0 ? (
+              <EmptyState icon="-" title="No discounts found" description="No discounts recorded for this period." />
+            ) : (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr><th>Time</th><th>Customer</th><th>Service</th><th>Type</th><th>Reason</th><th>Approved By</th><th>Amount</th></tr>
+                  </thead>
+                  <tbody>
+                    {discountRows.map((discount) => (
+                      <tr key={discount.id}>
+                        <td>{formatDateTime(discount.createdAt)}</td>
+                        <td>{discount.customerName}</td>
+                        <td>{discount.serviceName ?? "-"}</td>
+                        <td>{formatDiscountValue(discount)}</td>
+                        <td>{discount.reason ?? "-"}</td>
+                        <td>{discount.approvedByUserId ?? "-"}</td>
+                        <td><strong>{formatMoney(discount.amountCents)}</strong></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Card>
+        </section>
+      )}
+
+      {activeReport === "eod" && eodData && (
+        <section className="report-section">
+          <div className="report-summary">
+            <StatCard label="Gross Sales" value={formatMoney(eodData.grossServiceSalesCents)} />
+            <StatCard label="Discounts" value={formatMoney(eodData.discountTotalCents)} />
+            <StatCard label="Refunds" value={formatMoney(eodData.refundTotalCents)} />
+            <StatCard label="Net Sales" value={formatMoney(eodData.netServiceSalesCents)} />
+            <StatCard label="Tips Paid" value={formatMoney(eodData.tipTotalCents)} />
+            <StatCard label="Commission Payout" value={formatMoney(eodData.workerCommissionPayoutCents)} />
+            <StatCard label="Business Share" value={formatMoney(eodData.businessShareCents)} />
+            <StatCard label="Collected" value={formatMoney(eodData.totalCollectedCents)} />
+          </div>
+          <Card padding="lg">
+            <h2 className="card__title mb-2">End-of-Day Reconciliation - {reportLabel}</h2>
+            <div className="report-reconcile">
+              <div><span>Cash collected</span><strong>{formatMoney(eodData.cashTotalCents)}</strong></div>
+              <div><span>Card collected</span><strong>{formatMoney(eodData.cardTotalCents)}</strong></div>
+              <div><span>Gift card collected</span><strong>{formatMoney(eodData.giftCardTotalCents)}</strong></div>
+              <div><span>Worker commission</span><strong>{formatMoney(eodData.workerCommissionPayoutCents)}</strong></div>
+              <div><span>Worker tips</span><strong>{formatMoney(eodData.tipTotalCents)}</strong></div>
+              <div><span>Worker total pay</span><strong>{formatMoney(eodData.totalPayCents ?? eodData.workerCommissionPayoutCents + eodData.tipTotalCents)}</strong></div>
+              <div><span>POS card total</span><strong>{formatMoney(eodData.cardTotalCents)}</strong></div>
+              <div><span>Clover card total</span><strong>Unavailable</strong></div>
+              <div><span>Card difference</span><strong>Unavailable</strong></div>
+            </div>
+            <p className="text-muted text-sm mt-4">Clover settlement comparison will be available after a Clover reporting adapter is connected.</p>
+          </Card>
+        </section>
+      )}
+      {activeReport === "eod" && !eodData && !loading && !reportError && (
+        <EmptyState icon="-" title="No EOD data" description="Try adjusting the date range." />
       )}
     </>
   );
 }
 
-/* ════════════════════════════════════════
-   Receipt Preview
-   ════════════════════════════════════════ */
 function ReceiptPreview({ items, payments, subtotal, discounts, tips, total }: {
   items: CheckoutItem[];
   payments: PaymentEntry[];

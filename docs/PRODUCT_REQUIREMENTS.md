@@ -116,6 +116,8 @@ Turn lifecycle:
 
 Rules:
 
+- Workers who are not clocked into the current open salon session, or who have clocked out of it, are not available for turn assignment or suggestions.
+- Checkout can still attribute sale items, commissions, and tips to an existing worker without checking current availability.
 - Turn count increases when service starts.
 - Assignment alone does not increase turn count.
 - POS should show each worker's turns taken today.
@@ -166,8 +168,9 @@ Checkout supports:
 
 - Multiple services.
 - Multiple workers on one sale.
+- One-time custom checkout services with owner-entered name and price; these are temporary sale items and are not added to the service catalog.
 - Discount per sale or sale item.
-- Tip per worker/service.
+- Tips must not be determined or prefilled when sale items are added; Clover/payment-terminal tip flow determines any card tip after the sale is sent for payment. When Clover returns a card tip, Owner POS prompts the owner to allocate it either evenly between workers or by percentage of discounted service amount. If split evenly between workers, each worker's share is automatically distributed across that worker's services by percentage of discounted service amount. Approved allocated tips are attributed to sale items for worker/service reporting.
 - Printed receipt.
 - Refund tracking.
 - Date/time reporting.

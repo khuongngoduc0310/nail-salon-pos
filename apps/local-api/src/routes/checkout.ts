@@ -1,12 +1,15 @@
+import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { PaymentTerminalAdapter, TerminalPaymentStatus } from "@nail/payment-terminal";
+import type { PaymentTerminalAdapter, TerminalPaymentResult, TerminalPaymentStatus } from "@nail/payment-terminal";
 import {
+  allocateTipToSaleItems,
   calculateSaleItem,
   summarizeSale,
   type PaymentInput,
   type PaymentMethod,
   type PaymentStatus,
   type SaleItemInput,
+  type TipAllocationMode,
 } from "@nail/shared";
 import type { DbClient } from "../db.js";
 import { broadcast } from "../ws/events.js";
@@ -14,6 +17,7 @@ import {
   asObject,
   getParams,
   handleRouteError,
+  HttpError,
   optionalInteger,
   optionalString,
   requiredInteger,
@@ -47,14 +51,23 @@ type SaleItemRecord = {
   categoryNameSnapshot?: string | null;
   priceCents: number;
   discountCents: number;
+  finalServiceCents?: number;
   tipCents: number;
   commissionRateSnapshot?: number | string | { toString(): string };
 };
 
 type PaymentRecord = {
+  id?: string;
+  saleId?: string;
   method: PaymentMethod;
+  provider?: string | null;
+  providerPaymentId?: string | null;
+  idempotencyKey?: string | null;
+  rawProviderReference?: unknown;
   amountCents: number;
+  tipCents?: number;
   status: PaymentStatus;
+  createdAt?: Date | string;
 };
 
 export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient, terminal: PaymentTerminalAdapter) {
@@ -102,23 +115,32 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
       const body = asObject(request.body);
       const params = getParams(request);
       const saleId = requiredString(params.id, "id");
-      const serviceId = requiredString(body.serviceId, "serviceId");
+      const serviceId = optionalString(body.serviceId, "serviceId");
       const workerId = requiredString(body.workerId, "workerId");
+      if (body.tipCents !== undefined && body.tipCents !== null) {
+        throw new HttpError(400, "sale item tips are determined by the payment terminal after payment, not before sale completion");
+      }
 
       const result = await db.$transaction(async (tx) => {
-        const service = requireRecord<ServiceRecord>(
-          await tx.service.findUnique({ where: { id: serviceId }, include: { category: true } }),
-          "service not found"
-        );
+        const service = serviceId
+          ? requireRecord<ServiceRecord>(
+              await tx.service.findUnique({ where: { id: serviceId }, include: { category: true } }),
+              "service not found"
+            )
+          : null;
+        const customPriceCents = service ? undefined : requiredInteger(body.priceCents, "priceCents");
+        if (customPriceCents !== undefined && customPriceCents < 0) {
+          throw new HttpError(400, "priceCents must be a non-negative integer");
+        }
         const worker = requireRecord<WorkerRecord>(await tx.worker.findUnique({ where: { id: workerId } }), "worker not found");
         const item = calculateSaleItem({
           serviceId,
           workerId,
-          serviceNameSnapshot: service.name,
-          categoryNameSnapshot: service.category?.name ?? null,
-          priceCents: optionalInteger(body.priceCents, "priceCents") ?? service.priceCents,
+          serviceNameSnapshot: service?.name ?? requiredString(body.serviceName, "serviceName"),
+          categoryNameSnapshot: service?.category?.name ?? optionalString(body.categoryName, "categoryName") ?? "Custom",
+          priceCents: optionalInteger(body.priceCents, "priceCents") ?? service?.priceCents ?? customPriceCents ?? 0,
           discountCents: optionalInteger(body.discountCents, "discountCents") ?? 0,
-          tipCents: optionalInteger(body.tipCents, "tipCents") ?? 0,
+          tipCents: 0,
           commissionRate: Number(worker.commissionRate),
         });
 
@@ -181,12 +203,15 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
       const params = getParams(request);
       const saleId = requiredString(params.id, "id");
       const itemId = requiredString(params.itemId, "itemId");
+      if (body.tipCents !== undefined && body.tipCents !== null) {
+        throw new HttpError(400, "sale item tips are determined by the payment terminal after payment, not before sale completion");
+      }
 
       const result = await db.$transaction(async (tx) => {
         const existing = requireRecord<SaleItemRecord>(await tx.saleItem.findUnique({ where: { id: itemId } }), "sale item not found");
         const priceCents = optionalInteger(body.priceCents, "priceCents") ?? existing.priceCents;
         const discountCents = optionalInteger(body.discountCents, "discountCents") ?? existing.discountCents;
-        const tipCents = optionalInteger(body.tipCents, "tipCents") ?? existing.tipCents;
+        const tipCents = existing.tipCents;
         const recalculated = calculateSaleItem({
           workerId: optionalString(body.workerId, "workerId") ?? existing.workerId ?? "",
           serviceNameSnapshot: existing.serviceNameSnapshot ?? "Service",
@@ -250,43 +275,134 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
     return recordApprovedPayment(request, reply, db, "gift_card");
   });
 
+  app.post("/api/sales/:id/payments/card", async (request, reply) => {
+    return startCardPayment(request, reply, db, terminal);
+  });
+
   app.post("/api/sales/:id/payments/card/start", async (request, reply) => {
+    return startCardPayment(request, reply, db, terminal);
+  });
+
+  app.post("/api/payments/:paymentId/reconcile", async (request, reply) => {
+    try {
+      const params = getParams(request);
+      const paymentId = requiredString(params.paymentId, "paymentId");
+      const payment = requireRecord<PaymentRecord>(await db.payment.findUnique({ where: { id: paymentId } }), "payment not found");
+      if (payment.method !== "card") {
+        throw new HttpError(400, "only card payments can be reconciled with the payment terminal");
+      }
+      if (payment.status === "approved" || payment.status === "refunded") {
+        return { payment, terminalStatus: payment.status };
+      }
+
+      const createdAt = payment.createdAt ? new Date(payment.createdAt) : new Date(0);
+      const reconcileResult = await terminal.reconcile({ start: createdAt, end: new Date(), externalPaymentId: payment.idempotencyKey ?? undefined });
+      const terminalPayment = reconcileResult.payments.find((candidate) => matchesTerminalPayment(payment, candidate));
+      if (!terminalPayment || terminalPayment.status !== "approved") {
+        return { payment, terminalStatus: terminalPayment?.status ?? "not_found" };
+      }
+
+      const returnedTipCents = terminalPayment.tipCents ?? 0;
+      const chargedAmountCents = terminalPayment.totalChargedCents ?? payment.amountCents + returnedTipCents;
+      const result = await db.$transaction(async (tx) => {
+        const updatedPayment = await tx.payment.update({
+          where: { id: paymentId },
+          data: paymentUpdateFromTerminalResult(terminalPayment, payment.amountCents),
+        });
+        const sale = payment.saleId ? await recomputeSale(tx, payment.saleId) : null;
+        return { payment: updatedPayment, sale, terminalStatus: terminalPayment.status, chargedAmountCents };
+      });
+
+      return result;
+    } catch (error) {
+      return handleRouteError(error, reply);
+    }
+  });
+
+  app.post("/api/sales/:id/tips/allocate", async (request, reply) => {
     try {
       const body = asObject(request.body);
       const params = getParams(request);
       const saleId = requiredString(params.id, "id");
-      const amountCents = requiredInteger(body.amountCents, "amountCents");
-      const tipCents = optionalInteger(body.tipCents, "tipCents") ?? 0;
-      const idempotencyKey = requiredString(body.idempotencyKey, "idempotencyKey");
-      const terminalResult = await terminal.startSale({ amountCents, tipCents, idempotencyKey });
-      const paymentStatus = mapTerminalStatus(terminalResult.status);
+      const paymentId = requiredString(body.paymentId, "paymentId");
+      const splitMode = requiredString(body.splitMode, "splitMode") as TipAllocationMode;
+      if (splitMode !== "even_workers" && splitMode !== "service_amount_percentage") {
+        throw new HttpError(400, "splitMode must be even_workers or service_amount_percentage");
+      }
 
       const result = await db.$transaction(async (tx) => {
-        const payment = await tx.payment.create({
+        const payment = requireRecord<PaymentRecord>(await tx.payment.findUnique({ where: { id: paymentId } }), "payment not found");
+        if (payment.saleId && payment.saleId !== saleId) {
+          throw new HttpError(400, "payment does not belong to sale");
+        }
+        if (payment.method !== "card" || payment.status !== "approved") {
+          throw new HttpError(400, "only approved card tips can be allocated");
+        }
+        if ((payment.tipCents ?? 0) <= 0) {
+          throw new HttpError(400, "payment has no terminal tip to allocate");
+        }
+        if (isTipAlreadyAllocated(payment.rawProviderReference)) {
+          throw new HttpError(400, "payment tip has already been allocated");
+        }
+
+        const sale = requireRecord<SaleRecord>(await tx.sale.findUnique(saleLookup(saleId)), "sale not found");
+        const saleItems = (sale.items ?? []).filter((item) => item.workerId);
+        if (saleItems.length === 0) {
+          throw new HttpError(400, "sale has no active service items for tip allocation");
+        }
+
+        const allocations = allocateTipToSaleItems(
+          saleItems.map((item) => ({
+            id: item.id,
+            workerId: item.workerId ?? "",
+            finalServiceCents: item.finalServiceCents ?? Math.max(0, item.priceCents - item.discountCents),
+            tipCents: item.tipCents,
+          })),
+          payment.tipCents ?? 0,
+          splitMode
+        );
+
+        const updatedItems = [];
+        for (const allocation of allocations) {
+          const existing = requireRecord<SaleItemRecord>(
+            saleItems.find((item) => item.id === allocation.itemId) ?? null,
+            "sale item not found"
+          );
+          const recalculated = calculateSaleItem({
+            workerId: existing.workerId ?? "",
+            serviceNameSnapshot: existing.serviceNameSnapshot ?? "Service",
+            categoryNameSnapshot: existing.categoryNameSnapshot,
+            priceCents: existing.priceCents,
+            discountCents: existing.discountCents,
+            tipCents: allocation.tipCents,
+            commissionRate: Number(existing.commissionRateSnapshot ?? 0),
+          });
+          updatedItems.push(await tx.saleItem.update({
+            where: { id: allocation.itemId },
+            data: {
+              tipCents: allocation.tipCents,
+              workerTotalCents: recalculated.workerTotalCents,
+              businessCents: recalculated.businessCents,
+            },
+          }));
+        }
+
+        await tx.payment.update({
+          where: { id: paymentId },
           data: {
-            saleId,
-            method: "card",
-            provider: "mock",
-            providerPaymentId: terminalResult.providerPaymentId,
-            idempotencyKey,
-            amountCents,
-            tipCents,
-            status: paymentStatus,
-            cardBrand: terminalResult.cardBrand,
-            cardLast4: terminalResult.cardLast4,
-            authCode: terminalResult.authCode,
             rawProviderReference: {
-              status: terminalResult.status,
-              message: terminalResult.message,
+              ...safeJsonObject(payment.rawProviderReference),
+              tipAllocation: "allocated",
+              tipAllocationMode: splitMode,
             },
           },
         });
-        const sale = await recomputeSale(tx, saleId);
 
-        return { payment, sale, terminalStatus: terminalResult.status };
+        const recomputedSale = await recomputeSale(tx, saleId);
+        return { sale: recomputedSale, saleItems: updatedItems, allocations };
       });
 
-      return reply.code(201).send(result);
+      return result;
     } catch (error) {
       return handleRouteError(error, reply);
     }
@@ -297,6 +413,12 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
       const params = getParams(request);
       const saleId = requiredString(params.id, "id");
       const sale = requireRecord<SaleRecord>(await db.sale.findUnique(saleLookup(saleId)), "sale not found");
+      const unallocatedTipPayment = (sale.payments ?? []).find(
+        (payment) => payment.method === "card" && payment.status === "approved" && (payment.tipCents ?? 0) > 0 && !isTipAlreadyAllocated(payment.rawProviderReference)
+      );
+      if (unallocatedTipPayment) {
+        return reply.code(400).send({ error: "card tip must be allocated before sale completion" });
+      }
       const summary = summarizeSale(toSaleItems(sale.items ?? []), toPayments(sale.payments ?? []));
 
       if (!summary.canComplete) {
@@ -341,6 +463,104 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
       return handleRouteError(error, reply);
     }
   });
+}
+
+async function startCardPayment(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  db: DbClient,
+  terminal: PaymentTerminalAdapter
+) {
+  try {
+    const body = asObject(request.body);
+    const params = getParams(request);
+    const saleId = requiredString(params.id, "id");
+    const amountCents = requiredInteger(body.amountCents, "amountCents");
+    const idempotencyKey = optionalString(body.idempotencyKey, "idempotencyKey") ?? randomUUID();
+    if (amountCents <= 0) {
+      throw new HttpError(400, "amountCents must be a positive integer");
+    }
+
+    const pendingPayment = await db.payment.create({
+      data: {
+        saleId,
+        method: "card",
+        provider: "terminal",
+        idempotencyKey,
+        amountCents,
+        tipCents: 0,
+        status: "pending",
+        rawProviderReference: {
+          status: "pending",
+          tipAllocation: "not_applicable",
+          externalPaymentId: idempotencyKey,
+          saleId,
+        },
+      },
+    }) as { id: string };
+
+    try {
+      const terminalResult = await terminal.startSale({ amountCents, tipCents: 0, idempotencyKey, saleId });
+      const result = await db.$transaction(async (tx) => {
+        const payment = await tx.payment.update({
+          where: { id: pendingPayment.id },
+          data: paymentUpdateFromTerminalResult(terminalResult, amountCents),
+        });
+        const sale = await recomputeSale(tx, saleId);
+
+        return { payment, sale, terminalStatus: terminalResult.status };
+      });
+
+      return reply.code(201).send(result);
+    } catch (terminalError) {
+      const message = terminalError instanceof Error ? terminalError.message : "Payment terminal request failed";
+
+      try {
+        const reconcileResult = await terminal.reconcile({ start: new Date(Date.now() - 10 * 60 * 1000), end: new Date(), externalPaymentId: idempotencyKey });
+        const recoveredPayment = reconcileResult.payments.find((candidate) =>
+          candidate.status === "approved" && matchesTerminalPayment({ method: "card", status: "pending", idempotencyKey, amountCents, providerPaymentId: null, rawProviderReference: { saleId } }, candidate)
+        );
+        if (recoveredPayment) {
+          const recoveredResult = await db.$transaction(async (tx) => {
+            const payment = await tx.payment.update({
+              where: { id: pendingPayment.id },
+              data: paymentUpdateFromTerminalResult(recoveredPayment, amountCents),
+            });
+            const sale = await recomputeSale(tx, saleId);
+            return { payment, sale, terminalStatus: recoveredPayment.status, recovered: true };
+          });
+          return reply.code(201).send(recoveredResult);
+        }
+      } catch {
+        // Keep the original terminal error below; recovery is best-effort.
+      }
+
+      const result = await db.$transaction(async (tx) => {
+        const payment = await tx.payment.update({
+          where: { id: pendingPayment.id },
+          data: {
+            status: "failed",
+            rawProviderReference: {
+              status: "failed",
+              message,
+              baseAmountCents: amountCents,
+              tipCents: 0,
+              totalChargedCents: 0,
+              externalPaymentId: idempotencyKey,
+              saleId,
+              tipAllocation: "not_applicable",
+            },
+          },
+        });
+        const sale = await recomputeSale(tx, saleId);
+        return { payment, sale, terminalStatus: "failed" };
+      });
+
+      return reply.code(201).send(result);
+    }
+  } catch (error) {
+    return handleRouteError(error, reply);
+  }
 }
 
 async function recordApprovedPayment(
@@ -421,6 +641,99 @@ function toPayments(payments: PaymentRecord[]): PaymentInput[] {
 
 function mapTerminalStatus(status: TerminalPaymentStatus): PaymentStatus {
   return status === "approved" ? "approved" : status;
+}
+
+function matchesTerminalPayment(payment: PaymentRecord, candidate: TerminalPaymentResult): boolean {
+  const paymentReference = safeJsonObject(payment.rawProviderReference);
+  const candidateReference = safeJsonObject(candidate.rawProviderReference);
+  const candidateProviderReference = safeJsonObject(candidateReference.providerReference);
+  const candidatePaymentReference = safeJsonObject(candidateReference.payment);
+  const candidateOrderReference = safeJsonObject(candidateReference.order ?? candidatePaymentReference.order);
+  const expectedExternalPaymentId = readReferenceString(paymentReference.externalPaymentId) ?? payment.idempotencyKey ?? undefined;
+  const expectedProviderOrderId = readReferenceString(paymentReference.providerOrderId);
+  const expectedSaleId = readReferenceString(paymentReference.saleId) ?? payment.saleId;
+  const candidateExternalPaymentId = candidate.externalPaymentId
+    ?? readReferenceString(candidateReference.externalPaymentId)
+    ?? readReferenceString(candidateProviderReference.externalPaymentId)
+    ?? readReferenceString(candidatePaymentReference.externalPaymentId);
+  const candidateProviderOrderId = candidate.providerOrderId
+    ?? readReferenceString(candidateReference.providerOrderId)
+    ?? readReferenceString(candidateProviderReference.providerOrderId)
+    ?? readReferenceString(candidateProviderReference.orderId)
+    ?? readReferenceString(candidateOrderReference.id);
+  const candidateSaleId = candidate.saleId
+    ?? readReferenceString(candidateReference.saleId)
+    ?? readReferenceString(candidateProviderReference.saleId)
+    ?? readReferenceString(candidatePaymentReference.saleId);
+
+  return Boolean(
+    (payment.providerPaymentId && candidate.providerPaymentId === payment.providerPaymentId) ||
+    (expectedExternalPaymentId && candidateExternalPaymentId === expectedExternalPaymentId) ||
+    (expectedProviderOrderId && candidateProviderOrderId === expectedProviderOrderId) ||
+    (expectedSaleId && candidateSaleId === expectedSaleId && terminalAmountCanMatch(payment, candidate))
+  );
+}
+
+function terminalAmountCanMatch(payment: PaymentRecord, candidate: TerminalPaymentResult): boolean {
+  return candidate.baseAmountCents === payment.amountCents || candidate.totalChargedCents === payment.amountCents;
+}
+
+function paymentUpdateFromTerminalResult(terminalResult: {
+  status: TerminalPaymentStatus;
+  provider?: "mock" | "clover";
+  providerPaymentId?: string;
+  providerOrderId?: string;
+  externalPaymentId?: string;
+  saleId?: string;
+  authCode?: string;
+  cardBrand?: string;
+  cardLast4?: string;
+  baseAmountCents?: number;
+  tipCents?: number;
+  totalChargedCents?: number;
+  message?: string;
+  rawProviderReference?: Record<string, unknown>;
+}, requestedAmountCents: number) {
+  const paymentStatus = mapTerminalStatus(terminalResult.status);
+  const returnedTipCents = paymentStatus === "approved" ? terminalResult.tipCents ?? 0 : 0;
+  const chargedAmountCents = paymentStatus === "approved"
+    ? terminalResult.totalChargedCents ?? requestedAmountCents + returnedTipCents
+    : requestedAmountCents;
+
+  return {
+    provider: terminalResult.provider ?? "mock",
+    providerPaymentId: terminalResult.providerPaymentId,
+    amountCents: chargedAmountCents,
+    tipCents: returnedTipCents,
+    status: paymentStatus,
+    cardBrand: terminalResult.cardBrand,
+    cardLast4: terminalResult.cardLast4,
+    authCode: terminalResult.authCode,
+    rawProviderReference: {
+      status: terminalResult.status,
+      message: terminalResult.message,
+      baseAmountCents: terminalResult.baseAmountCents ?? requestedAmountCents,
+      tipCents: returnedTipCents,
+      totalChargedCents: chargedAmountCents,
+      externalPaymentId: terminalResult.externalPaymentId,
+      providerOrderId: terminalResult.providerOrderId,
+      saleId: terminalResult.saleId,
+      providerReference: terminalResult.rawProviderReference,
+      tipAllocation: returnedTipCents > 0 ? "pending" : "not_applicable",
+    },
+  };
+}
+
+function safeJsonObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function readReferenceString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function isTipAlreadyAllocated(value: unknown): boolean {
+  return safeJsonObject(value).tipAllocation === "allocated";
 }
 
 function requireRecord<T>(record: unknown | null, message: string): T {

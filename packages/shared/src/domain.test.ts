@@ -7,6 +7,7 @@ import {
   evaluateSaleCompletion,
   rankSuggestedWorkers,
   summarizeSale,
+  allocateTipToSaleItems,
   type PaymentInput,
 } from "./index.js";
 
@@ -87,12 +88,82 @@ describe("worker suggestions", () => {
         lastTurnEndedAt: null,
         salesTodayCents: 0,
       },
+      {
+        workerId: "clocked-out",
+        name: "Clocked Out",
+        status: "available",
+        turnsTakenToday: 0,
+        lastTurnEndedAt: null,
+        salesTodayCents: 0,
+        checkedIn: false,
+      },
     ]);
 
     expect(ranked.map((worker) => [worker.workerId, worker.suggestionRank])).toEqual([
       ["amy", 1],
       ["bella", 2],
       ["cindy", 3],
+    ]);
+  });
+
+  it("excludes workers who are not clocked in", () => {
+    const ranked = rankSuggestedWorkers([
+      {
+        workerId: "clocked-in",
+        name: "Clocked In",
+        status: "available",
+        turnsTakenToday: 0,
+        lastTurnEndedAt: null,
+        salesTodayCents: 0,
+        checkedIn: true,
+      },
+      {
+        workerId: "not-clocked-in",
+        name: "Not Clocked In",
+        status: "available",
+        turnsTakenToday: 0,
+        lastTurnEndedAt: null,
+        salesTodayCents: 0,
+        checkedIn: false,
+      },
+    ]);
+
+    expect(ranked.map((worker) => worker.workerId)).toEqual(["clocked-in"]);
+  });
+});
+
+describe("tip allocation", () => {
+  it("splits Clover tip by service amount percentage", () => {
+    expect(
+      allocateTipToSaleItems(
+        [
+          { id: "item-1", workerId: "worker-1", finalServiceCents: 3000, tipCents: 0 },
+          { id: "item-2", workerId: "worker-2", finalServiceCents: 7000, tipCents: 0 },
+        ],
+        1000,
+        "service_amount_percentage"
+      )
+    ).toEqual([
+      { itemId: "item-1", addedTipCents: 300, tipCents: 300 },
+      { itemId: "item-2", addedTipCents: 700, tipCents: 700 },
+    ]);
+  });
+
+  it("splits Clover tip evenly by worker, then by each worker service amount", () => {
+    expect(
+      allocateTipToSaleItems(
+        [
+          { id: "item-1", workerId: "worker-1", finalServiceCents: 3000, tipCents: 100 },
+          { id: "item-2", workerId: "worker-1", finalServiceCents: 1000, tipCents: 0 },
+          { id: "item-3", workerId: "worker-2", finalServiceCents: 4000, tipCents: 0 },
+        ],
+        1001,
+        "even_workers"
+      )
+    ).toEqual([
+      { itemId: "item-1", addedTipCents: 376, tipCents: 476 },
+      { itemId: "item-2", addedTipCents: 125, tipCents: 125 },
+      { itemId: "item-3", addedTipCents: 500, tipCents: 500 },
     ]);
   });
 });

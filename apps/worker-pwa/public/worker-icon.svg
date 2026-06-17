@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Nail Salon Worker">
+  <rect width="512" height="512" rx="112" fill="#2f5f57"/>
+  <circle cx="380" cy="132" r="64" fill="#e8f0ed" opacity="0.95"/>
+  <path d="M161 353c-26-26-28-67-5-96l119-148c17-21 48-23 68-4 19 19 18 50-3 67L192 291c-13 10-14 29-3 41l3 3c12 11 31 10 41-3l105-131c15-19 43-22 62-6 18 15 21 43 6 62L300 388c-35 43-99 47-139 8l-1-1z" fill="#ffffff"/>
+  <path d="M169 349c23 22 60 20 80-5l107-132" fill="none" stroke="#f9d6df" stroke-width="32" stroke-linecap="round"/>
+  <path d="M132 401h248" stroke="#e8f0ed" stroke-width="28" stroke-linecap="round" opacity="0.9"/>
+</svg>

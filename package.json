@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "corepack pnpm --parallel --filter @nail/local-api --filter @nail/owner-pos --filter @nail/worker-pwa --filter @nail/customer-pwa dev",
     "dev:api": "corepack pnpm --filter @nail/local-api dev",
+    "dev:mock-clover": "corepack pnpm --filter @nail/mock-clover-device dev",
     "dev:owner": "corepack pnpm --filter @nail/owner-pos dev",
     "dev:worker": "corepack pnpm --filter @nail/worker-pwa dev",
     "dev:customer": "corepack pnpm --filter @nail/customer-pwa dev",
@@ -27,5 +28,11 @@
     "typescript-eslint": "^8.20.0",
     "vite": "^6.0.7",
     "vitest": "^2.1.8"
+  },
+  "dependencies": {
+    "@ladybugdb/core": "^0.17.1"
+  },
+  "allowScripts": {
+    "@ladybugdb/core@0.17.1": true
   }
 }

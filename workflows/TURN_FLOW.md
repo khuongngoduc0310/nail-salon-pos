@@ -8,6 +8,8 @@ The POS suggests workers, but owner chooses.
 
 Filter out:
 
+- Workers who are not clocked into the current open salon session.
+- Workers who clocked out of the current open salon session.
 - Off today.
 - On break.
 - In service.
@@ -23,7 +25,7 @@ Rank available workers by:
 
 1. Customer appears in waiting queue.
 2. Owner clicks `Assign worker`.
-3. POS displays suggested worker ranking.
+3. POS displays suggested worker ranking for clocked-in available workers.
 4. Owner chooses worker.
 5. Turn row is created with status `assigned`.
 6. Check-in status becomes `assigned`.

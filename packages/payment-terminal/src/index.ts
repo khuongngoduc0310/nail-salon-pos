@@ -2,23 +2,34 @@ export type TerminalConnectionStatus = {
   connected: boolean;
   provider: "mock" | "clover";
   message?: string;
+  pairingRequired?: boolean;
+  pairingCode?: string;
 };
 
 export type TerminalSaleRequest = {
   amountCents: number;
   tipCents: number;
   idempotencyKey: string;
+  saleId?: string;
 };
 
 export type TerminalPaymentStatus = "approved" | "declined" | "cancelled" | "failed";
 
 export type TerminalPaymentResult = {
   status: TerminalPaymentStatus;
+  provider?: "mock" | "clover";
   providerPaymentId?: string;
+  providerOrderId?: string;
+  externalPaymentId?: string;
+  saleId?: string;
   authCode?: string;
   cardBrand?: string;
   cardLast4?: string;
+  baseAmountCents?: number;
+  tipCents?: number;
+  totalChargedCents?: number;
   message?: string;
+  rawProviderReference?: Record<string, unknown>;
 };
 
 export type TerminalRefundRequest = {
@@ -36,6 +47,7 @@ export type TerminalRefundResult = {
 export type ReconciliationRequest = {
   start: Date;
   end: Date;
+  externalPaymentId?: string;
 };
 
 export type ReconciliationResult = {
@@ -54,14 +66,23 @@ export interface PaymentTerminalAdapter {
 
 export class MockTerminalAdapter implements PaymentTerminalAdapter {
   private nextStatus: TerminalPaymentStatus;
+  private nextTipCents: number;
   private readonly approvedPayments: TerminalPaymentResult[] = [];
 
-  constructor(nextStatus: TerminalPaymentStatus = "approved") {
+  constructor(nextStatus: TerminalPaymentStatus = "approved", nextTipCents = 0) {
     this.nextStatus = nextStatus;
+    this.nextTipCents = nextTipCents;
   }
 
   setNextStatus(status: TerminalPaymentStatus): void {
     this.nextStatus = status;
+  }
+
+  setNextTipCents(tipCents: number): void {
+    if (!Number.isInteger(tipCents) || tipCents < 0) {
+      throw new Error("tipCents must be a non-negative integer");
+    }
+    this.nextTipCents = tipCents;
   }
 
   async verifyConnection(): Promise<TerminalConnectionStatus> {
@@ -75,12 +96,20 @@ export class MockTerminalAdapter implements PaymentTerminalAdapter {
       return { status, message: `Mock ${status}` };
     }
 
+    const tipCents = this.nextTipCents;
     const result: TerminalPaymentResult = {
       status,
+      provider: "mock",
       providerPaymentId: `mock_${input.idempotencyKey}`,
+      providerOrderId: input.saleId ? `mock_order_${input.saleId}` : undefined,
+      externalPaymentId: input.idempotencyKey,
+      saleId: input.saleId,
       authCode: "MOCKOK",
       cardBrand: "Visa",
       cardLast4: "1111",
+      baseAmountCents: input.amountCents,
+      tipCents,
+      totalChargedCents: input.amountCents + tipCents,
     };
     this.approvedPayments.push(result);
     return result;
@@ -97,11 +126,14 @@ export class MockTerminalAdapter implements PaymentTerminalAdapter {
     };
   }
 
-  async reconcile(): Promise<ReconciliationResult> {
+  async reconcile(_input?: ReconciliationRequest): Promise<ReconciliationResult> {
+    const payments = _input?.externalPaymentId
+      ? this.approvedPayments.filter((payment) => payment.externalPaymentId === _input.externalPaymentId)
+      : this.approvedPayments;
     return {
       provider: "mock",
-      cardTotalCents: 0,
-      payments: [...this.approvedPayments],
+      cardTotalCents: payments.reduce((sum, payment) => sum + (payment.totalChargedCents ?? 0), 0),
+      payments: [...payments],
     };
   }
 }

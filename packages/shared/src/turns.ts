@@ -27,6 +27,7 @@ export type WorkerRankingInput = {
   lastTurnEndedAt: Date | string | null;
   salesTodayCents: number;
   activeTurn?: unknown | null;
+  checkedIn?: boolean;
 };
 
 export type SuggestedWorker = WorkerRankingInput & {
@@ -116,7 +117,7 @@ export function calculateTurnCount(
 // ─── Worker ranking (round-robin) ───────────────────────────────────
 
 /**
- * Ranks available workers in round-robin order.
+ * Ranks available, clocked-in workers in round-robin order.
  *
  * Round-robin logic: the worker whose last turn ended the longest ago
  * (or who hasn't had a turn yet today) is ranked first.
@@ -127,6 +128,7 @@ export function rankSuggestedWorkers(workers: WorkerRankingInput[]): SuggestedWo
   return [...workers]
     .filter(
       (worker) =>
+        worker.checkedIn !== false &&
         worker.status !== "off_today" &&
         worker.status !== "on_break" &&
         worker.status !== "in_service",

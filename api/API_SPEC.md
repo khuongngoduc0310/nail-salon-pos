@@ -75,9 +75,11 @@ Owner sees all. Worker sees self only.
 
 Owner only.
 
+Request includes worker profile fields, commission rate, and a required 4-6 digit `pin` for Worker PWA login.
+
 ### PATCH /workers/:id
 
-Owner only.
+Owner only. May include `pin` to replace the worker's login PIN; omit `pin` to keep the existing PIN.
 
 ### PATCH /workers/:id/status
 
@@ -225,7 +227,8 @@ Response:
       "activeTurn": null,
       "salesTodayCents": 24000,
       "tipsTodayCents": 4500,
-      "suggestionRank": 1
+      "suggestionRank": 1,
+      "checkedIn": true
     }
   ]
 }
@@ -233,7 +236,7 @@ Response:
 
 ### POST /turns/suggest
 
-Returns suggested workers for a check-in.
+Returns suggested workers for a check-in. Only workers clocked into the current open salon session and not clocked out are eligible for suggestions.
 
 ### POST /turns/assign
 
@@ -271,11 +274,11 @@ Create sale from check-in/appointment.
 
 ### POST /sales/:id/items
 
-Add service item assigned to worker.
+Add service item assigned to worker. Checkout may assign sale items to an existing worker for correct commission and later tip attribution; it does not require the worker to be currently clocked in or otherwise available for turn assignment. Use `serviceId` for catalog services, or omit `serviceId` and provide `serviceName` plus `priceCents` for a one-time custom checkout service that is not added to the service catalog. Do not include or prefill `tipCents` when adding sale items; tips are determined by the Clover/payment-terminal flow after the sale is sent for payment.
 
 ### PATCH /sales/:id/items/:itemId
 
-Edit worker, price, discount, or tip before sale completion.
+Edit worker, price, or discount before sale completion. Do not edit sale-item tips before payment.
 
 ### POST /sales/:id/discounts
 
@@ -289,33 +292,60 @@ Records cash payment.
 
 Redeems gift card.
 
-### POST /sales/:id/payments/card/start
+### POST /sales/:id/payments/card
 
-Starts card payment through configured terminal adapter.
+Creates a backend `pending` card payment, starts card payment through the configured terminal adapter, then updates the payment from the terminal result. `/sales/:id/payments/card/start` remains as a backwards-compatible alias.
 
 Request:
 
 ```json
 {
   "amountCents": 6000,
-  "tipCents": 1000,
   "idempotencyKey": "uuid"
 }
 ```
+
+`idempotencyKey` is optional; the API generates one when omitted.
 
 Response:
 
 ```json
 {
-  "paymentId": "uuid",
-  "status": "pending",
-  "terminalStatus": "awaiting_customer"
+  "payment": {
+    "id": "uuid",
+    "status": "approved",
+    "amountCents": 7000,
+    "tipCents": 1000
+  },
+  "sale": {},
+  "terminalStatus": "approved"
 }
 ```
+
+`amountCents` is the approved terminal charge including any Clover-returned tip. The POS sends the pre-tip card amount to Clover and does not prefill the tip.
+
+### POST /payments/:paymentId/reconcile
+
+Reconciles a pending/uncertain card payment through the configured terminal adapter. If the terminal confirms an approved payment matching the stored provider reference or idempotency key, the backend updates the payment to `approved` and recomputes the sale. If no approved terminal payment is found, the sale remains unpaid or partially paid.
 
 ### POST /sales/:id/payments/card/callback
 
 Internal endpoint for terminal adapter to update payment result.
+
+### POST /sales/:id/tips/allocate
+
+Allocates an approved Clover-returned card tip to sale items for worker/service reporting. Required before completing a sale when a card payment has an unallocated returned tip.
+
+Request:
+
+```json
+{
+  "paymentId": "uuid",
+  "splitMode": "even_workers"
+}
+```
+
+`splitMode` may be `even_workers` or `service_amount_percentage`. `service_amount_percentage` distributes the tip across all active sale items by discounted service amount. `even_workers` gives each worker an equal share and automatically divides each worker's share across that worker's services by discounted service amount percentage.
 
 ### POST /sales/:id/complete
 
@@ -360,13 +390,34 @@ All reports accept:
 
 ## Clover configuration
 
-### GET /settings/clover
+### GET /terminal/config
 
-Owner only.
+Returns safe current terminal configuration for the Checkout tab. Secret fields such as Clover access/auth tokens are not returned in full; response only includes configured flags and masked previews.
 
-### PATCH /settings/clover
+### PATCH /terminal/config
 
-Owner only.
+Applies terminal configuration from the Checkout tab and rebuilds the active local API terminal adapter without restarting the API.
+
+Supported fields include:
+
+- `transport`: `mock`, `ws-lan`, `rest-local`, or `usb-sidecar`
+- `wsHost`, `wsPort`, `wsPath`, `wsSecure` for real Clover LAN WebSocket
+- `remoteApplicationId`, `posName`, `serialNumber`, optional `authToken`
+- `deviceBaseUrl`, `deviceId`, `posId`, optional `accessToken` for REST-local/mock Clover
+
+Returns `{ config, status }`.
+
+### GET /terminal/status
+
+Returns configured payment terminal status. For Clover LAN pairing this may include `pairingRequired` and `pairingCode`; the pairing code must be entered on the Clover device and the returned auth token must remain local/secret.
+
+### POST /terminal/pair/start
+
+Starts or resumes Clover LAN pairing/connection through the configured `remote-pay-cloud` adapter. Returns the same shape as `/terminal/status`.
+
+### GET /terminal/pair/status
+
+Returns current Clover LAN pairing/connection state.
 
 ### POST /terminal/verify-connection
 

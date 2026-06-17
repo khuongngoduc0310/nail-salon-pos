@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { DbClient } from "../db.js";
 import { asObject, getParams, handleRouteError, requiredString } from "../http.js";
+import { verifyPin } from "./pin.js";
 
 type AuthUser = {
   id: string;
@@ -233,11 +234,11 @@ function isDevOwnerAuthId(emailOrPhone: string): boolean {
 }
 
 function isValidPin(user: AuthUser, emailOrPhone: string, passwordOrPin: string): boolean {
-  if (user.pinHash && passwordOrPin === user.pinHash) return true;
+  if (verifyPin(passwordOrPin, user.pinHash)) return true;
 
   if (process.env.NODE_ENV === "production") return false;
 
-  if (user.pinHash === "dev-pin-placeholder" && passwordOrPin === DEV_OWNER_PIN) return true;
+  if ((user.pinHash === "dev-pin-placeholder" || user.pinHash === null) && passwordOrPin === DEV_OWNER_PIN) return true;
   return user.role === "owner" && emailOrPhone === DEV_OWNER_AUTH_ID && passwordOrPin === DEV_OWNER_PIN;
 }
 

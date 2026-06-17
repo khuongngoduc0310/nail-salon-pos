@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { MockTerminalAdapter } from "@nail/payment-terminal";
 import { buildServer } from "./server.js";
 import type { DbClient } from "./db.js";
+import { hashPin } from "./routes/pin.js";
 
 type Call = {
   model: string;
@@ -33,7 +34,7 @@ function createFakeDb() {
     },
     update: async (args: unknown) => {
       calls.push({ model, method: "update", args });
-      return { id: "updated", args };
+      return { id: "updated", userId: "user-1", args };
     },
     updateMany: async (args: unknown) => {
       calls.push({ model, method: "updateMany", args });
@@ -136,7 +137,7 @@ function createCheckoutFakeDb() {
       totalCents: 0,
       amountPaidCents: 0,
       items: [] as Array<{ id: string; priceCents: number; discountCents: number; tipCents: number; status: string }>,
-      payments: [] as Array<{ method: "cash" | "card" | "gift_card"; amountCents: number; status: "approved" | "declined" | "cancelled" | "failed" }>,
+      payments: [] as Array<{ id?: string; saleId?: string; method: "cash" | "card" | "gift_card"; amountCents: number; status: "pending" | "approved" | "declined" | "cancelled" | "failed"; providerPaymentId?: string; idempotencyKey?: string; rawProviderReference?: unknown; createdAt?: Date }>,
     },
   };
   const nextId = (prefix: string) => `${prefix}-${id++}`;
@@ -221,13 +222,25 @@ function createCheckoutFakeDb() {
         calls.push({ model: "payment", method: "findMany", args });
         return [];
       },
+      findUnique: async (args: unknown) => {
+        calls.push({ model: "payment", method: "findUnique", args });
+        const id = (args as { where?: { id?: string } }).where?.id;
+        return state.sale.payments.find((payment) => (payment as { id?: string }).id === id) ?? null;
+      },
       create: async (args: unknown) => {
         calls.push({ model: "payment", method: "create", args });
         const data = (args as {
-          data: { method: "cash" | "card" | "gift_card"; amountCents: number; status: "approved" | "declined" | "cancelled" | "failed" };
+          data: { method: "cash" | "card" | "gift_card"; amountCents: number; status: "pending" | "approved" | "declined" | "cancelled" | "failed" };
         }).data;
         const payment = { id: nextId("payment"), ...data };
-        state.sale.payments.push(data);
+        state.sale.payments.push(payment);
+        return payment;
+      },
+      update: async (args: unknown) => {
+        calls.push({ model: "payment", method: "update", args });
+        const id = (args as { where?: { id?: string }; data: Record<string, unknown> }).where?.id;
+        const payment = state.sale.payments.find((candidate) => (candidate as { id?: string }).id === id) ?? state.sale.payments[0];
+        Object.assign(payment, (args as { data: Record<string, unknown> }).data);
         return payment;
       },
     },
@@ -339,6 +352,7 @@ function createReportFakeDb() {
         discountCents: 0,
         finalServiceCents: 12000,
         workerCommissionCents: 7200,
+        commissionRateSnapshot: 0.6,
         tipCents: 1000,
         status: "active",
       },
@@ -351,11 +365,22 @@ function createReportFakeDb() {
         discountCents: 0,
         finalServiceCents: 8000,
         workerCommissionCents: 4000,
+        commissionRateSnapshot: 0.5,
         tipCents: 500,
         status: "active",
       },
     ],
-    payments: [{ method: "card", amountCents: 21500, status: "approved" }],
+    payments: [{
+      id: "payment-card",
+      saleId: "sale-paid",
+      method: "card",
+      provider: "clover",
+      providerPaymentId: "clover-payment-1",
+      amountCents: 21500,
+      tipCents: 1500,
+      status: "approved",
+      createdAt: new Date("2026-05-31T15:00:00.000Z"),
+    }],
     refunds: [],
     discounts: [],
     customer: { name: "Mary" },
@@ -385,6 +410,31 @@ function createReportFakeDb() {
     discounts: [],
   };
   const sales = [paidSale, draftSale];
+  const payments = paidSale.payments;
+  const refunds = [{
+    id: "refund-1",
+    saleId: "sale-paid",
+    paymentId: "payment-card",
+    amountCents: 2000,
+    reason: "Owner approved correction",
+    approvedByUserId: "owner-1",
+    createdAt: new Date("2026-05-31T16:00:00.000Z"),
+    sale: paidSale,
+    payment: payments[0],
+  }];
+  const discounts = [{
+    id: "discount-1",
+    saleId: "sale-paid",
+    saleItemId: "item-paid",
+    type: "amount",
+    amountCents: 1000,
+    percent: null,
+    reason: "Loyalty",
+    approvedByUserId: "owner-1",
+    createdAt: new Date("2026-05-31T14:30:00.000Z"),
+    sale: paidSale,
+    saleItem: paidSale.items[0],
+  }];
   const workers = [
     { id: "worker-1", displayName: "Amy", commissionRate: 0.6, active: true, user: { name: "Amy" } },
     { id: "worker-2", displayName: "Bella", commissionRate: 0.5, active: true, user: { name: "Bella" } },
@@ -444,10 +494,12 @@ function createReportFakeDb() {
             completedAt?: { gte?: Date; lt?: Date };
             status?: { in?: string[] };
             items?: { some?: { workerId?: string; status?: string } };
+            payments?: { some?: { method?: string } };
           };
         } | undefined)?.where;
         return sales.filter((sale) =>
           (!where?.status?.in || where.status.in.includes(sale.status)) &&
+          (!where?.payments?.some?.method || sale.payments.some((payment) => payment.method === where.payments?.some?.method)) &&
           (!where?.items?.some?.workerId || sale.items.some((item) =>
             item.workerId === where.items?.some?.workerId &&
             (!where.items?.some?.status || item.status === where.items.some.status)
@@ -479,9 +531,40 @@ function createReportFakeDb() {
         );
       },
     },
-    payment: emptyModel("payment", calls),
-    discount: emptyModel("discount", calls),
-    refund: emptyModel("refund", calls),
+    payment: {
+      ...emptyModel("payment", calls),
+      findMany: async (args?: unknown) => {
+        calls.push({ model: "payment", method: "findMany", args });
+        const where = (args as {
+          where?: {
+            createdAt?: { gte?: Date; lt?: Date };
+            method?: string;
+            sale?: { items?: { some?: { workerId?: string } } };
+          };
+        } | undefined)?.where;
+        return payments.filter((payment) =>
+          (!where?.method || payment.method === where.method) &&
+          (!where?.sale?.items?.some?.workerId || paidSale.items.some((item) => item.workerId === where.sale?.items?.some?.workerId)) &&
+          inRange(payment.createdAt, where?.createdAt)
+        ).map((payment) => ({ ...payment, sale: paidSale }));
+      },
+    },
+    discount: {
+      ...emptyModel("discount", calls),
+      findMany: async (args?: unknown) => {
+        calls.push({ model: "discount", method: "findMany", args });
+        const where = (args as { where?: { createdAt?: { gte?: Date; lt?: Date } } } | undefined)?.where;
+        return discounts.filter((discount) => inRange(discount.createdAt, where?.createdAt));
+      },
+    },
+    refund: {
+      ...emptyModel("refund", calls),
+      findMany: async (args?: unknown) => {
+        calls.push({ model: "refund", method: "findMany", args });
+        const where = (args as { where?: { createdAt?: { gte?: Date; lt?: Date } } } | undefined)?.where;
+        return refunds.filter((refund) => inRange(refund.createdAt, where?.createdAt));
+      },
+    },
     session: emptyModel("session", calls),
     workerSession: emptyModel("workerSession", calls),
     $transaction: async <T>(callback: (tx: DbClient) => Promise<T>): Promise<T> => callback(db as unknown as DbClient),
@@ -573,12 +656,263 @@ describe("local API CRUD routes", () => {
     const response = await app.inject({
       method: "POST",
       url: "/api/workers",
-      payload: { name: "Amy", email: "amy@example.com", commissionRate: 0.6 },
+      payload: { name: "Amy", email: "amy@example.com", commissionRate: 0.6, pin: "2468" },
     });
 
     expect(response.statusCode).toBe(201);
-    expect(calls[0]).toMatchObject({ model: "user", method: "create" });
+    expect(calls[0]).toMatchObject({
+      model: "user",
+      method: "create",
+      args: { data: expect.objectContaining({ pinHash: expect.stringMatching(/^scrypt:/) }) },
+    });
+    const pinHash = (calls[0].args as { data: { pinHash: string } }).data.pinHash;
+    expect(pinHash).not.toBe("2468");
     expect(calls[1]).toMatchObject({ model: "worker", method: "create" });
+  });
+
+  it("rejects creating a worker without a PIN", async () => {
+    const { db } = createFakeDb();
+    const app = await buildServer({ db, logger: false });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/workers",
+      payload: { name: "Amy", email: "amy@example.com", commissionRate: 0.6 },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ error: "pin is required" });
+  });
+
+  it("updates a worker PIN on the linked user record", async () => {
+    const { db, calls } = createFakeDb();
+    const app = await buildServer({ db, logger: false });
+
+    const response = await app.inject({
+      method: "PATCH",
+      url: "/api/workers/worker-1",
+      payload: { displayName: "Amy", commissionRate: 0.55, pin: "1357" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(calls).toContainEqual({
+      model: "worker",
+      method: "update",
+      args: {
+        where: { id: "worker-1" },
+        data: { displayName: "Amy", commissionRate: 0.55 },
+      },
+    });
+    expect(calls).toContainEqual({
+      model: "user",
+      method: "update",
+      args: { where: { id: "user-1" }, data: { pinHash: expect.stringMatching(/^scrypt:/) } },
+    });
+    const userUpdate = calls.find((call) => call.model === "user" && call.method === "update");
+    const pinHash = (userUpdate?.args as { data: { pinHash: string } }).data.pinHash;
+    expect(pinHash).not.toBe("1357");
+  });
+
+  it("updates only the linked user when changing just a worker PIN", async () => {
+    const { db, calls } = createFakeDbWithWorkers([{ id: "worker-1", userId: "user-1" }]);
+    const app = await buildServer({ db, logger: false });
+
+    const response = await app.inject({
+      method: "PATCH",
+      url: "/api/workers/worker-1",
+      payload: { pin: "8642" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(calls).toContainEqual({
+      model: "worker",
+      method: "findUnique",
+      args: { where: { id: "worker-1" } },
+    });
+    expect(calls).toContainEqual({
+      model: "user",
+      method: "update",
+      args: { where: { id: "user-1" }, data: { pinHash: expect.stringMatching(/^scrypt:/) } },
+    });
+  });
+
+  it("rejects worker PINs that are not 4 to 6 digits before DB writes", async () => {
+    for (const pin of ["12ab", "123", "1234567", 1234]) {
+      const { db, calls } = createFakeDb();
+      const app = await buildServer({ db, logger: false });
+
+      const response = await app.inject({
+        method: "PATCH",
+        url: "/api/workers/worker-1",
+        payload: { pin },
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(calls).toEqual([]);
+    }
+  });
+
+  it("returns 404 when changing a PIN for a missing worker", async () => {
+    const { db, calls } = createFakeDbWithWorkers([]);
+    (db as unknown as { worker: { findUnique(args: unknown): Promise<unknown | null> } }).worker.findUnique = async (args: unknown) => {
+      calls.push({ model: "worker", method: "findUnique", args });
+      return null;
+    };
+    const app = await buildServer({ db, logger: false });
+
+    const response = await app.inject({
+      method: "PATCH",
+      url: "/api/workers/missing-worker",
+      payload: { pin: "2468" },
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toMatchObject({ error: "Worker not found" });
+  });
+
+  it("does not update the user PIN during profile-only worker edits", async () => {
+    const { db, calls } = createFakeDb();
+    const app = await buildServer({ db, logger: false });
+
+    const response = await app.inject({
+      method: "PATCH",
+      url: "/api/workers/worker-1",
+      payload: { displayName: "Amy", commissionRate: 0.55 },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(calls.some((call) => call.model === "user" && call.method === "update")).toBe(false);
+  });
+
+  it("logs in a worker with a hashed PIN", async () => {
+    const { db } = createFakeDbWithWorkers([{
+      id: "worker-1",
+      displayName: "Amy",
+      currentStatus: "available",
+      commissionRate: 0.6,
+      user: {
+        id: "user-1",
+        name: "Amy",
+        role: "worker",
+        email: "amy@example.com",
+        phone: null,
+        active: true,
+        pinHash: hashPin("2468"),
+        passwordHash: null,
+      },
+    }]);
+    const app = await buildServer({ db, logger: false });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/auth/worker-login",
+      payload: { workerId: "worker-1", pin: "2468" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      user: { id: "user-1", role: "worker" },
+      worker: { id: "worker-1", displayName: "Amy" },
+    });
+  });
+
+  it("rejects a wrong worker PIN", async () => {
+    const { db } = createFakeDbWithWorkers([{
+      id: "worker-1",
+      displayName: "Amy",
+      currentStatus: "available",
+      commissionRate: 0.6,
+      user: {
+        id: "user-1",
+        name: "Amy",
+        role: "worker",
+        email: "amy@example.com",
+        phone: null,
+        active: true,
+        pinHash: hashPin("2468"),
+        passwordHash: null,
+      },
+    }]);
+    const app = await buildServer({ db, logger: false });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/auth/worker-login",
+      payload: { workerId: "worker-1", pin: "1357" },
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toMatchObject({ error: "Invalid PIN" });
+  });
+
+  it("rejects worker login for a missing or inactive worker", async () => {
+    const { db, calls } = createFakeDbWithWorkers([]);
+    (db as unknown as { worker: { findUnique(args: unknown): Promise<unknown | null> } }).worker.findUnique = async (args: unknown) => {
+      calls.push({ model: "worker", method: "findUnique", args });
+      return null;
+    };
+    const app = await buildServer({ db, logger: false });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/auth/worker-login",
+      payload: { workerId: "worker-1", pin: "2468" },
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toMatchObject({ error: "Worker not found or inactive" });
+  });
+
+  it("keeps legacy raw and dev-placeholder worker PIN login paths working", async () => {
+    const legacy = createFakeDbWithWorkers([{
+      id: "worker-1",
+      displayName: "Amy",
+      currentStatus: "available",
+      commissionRate: 0.6,
+      user: {
+        id: "user-1",
+        name: "Amy",
+        role: "worker",
+        email: "amy@example.com",
+        phone: null,
+        active: true,
+        pinHash: "2468",
+        passwordHash: null,
+      },
+    }]);
+    const dev = createFakeDbWithWorkers([{
+      id: "worker-2",
+      displayName: "Bella",
+      currentStatus: "available",
+      commissionRate: 0.6,
+      user: {
+        id: "user-2",
+        name: "Bella",
+        role: "worker",
+        email: "bella@example.com",
+        phone: null,
+        active: true,
+        pinHash: "dev-pin-placeholder",
+        passwordHash: null,
+      },
+    }]);
+
+    const legacyApp = await buildServer({ db: legacy.db, logger: false });
+    const devApp = await buildServer({ db: dev.db, logger: false });
+
+    const legacyResponse = await legacyApp.inject({
+      method: "POST",
+      url: "/api/auth/worker-login",
+      payload: { workerId: "worker-1", pin: "2468" },
+    });
+    const devResponse = await devApp.inject({
+      method: "POST",
+      url: "/api/auth/worker-login",
+      payload: { workerId: "worker-2", pin: "1234" },
+    });
+
+    expect(legacyResponse.statusCode).toBe(200);
+    expect(devResponse.statusCode).toBe(200);
   });
 
   it("clocks a worker in for the current session", async () => {
@@ -835,6 +1169,7 @@ describe("local API CRUD routes", () => {
         id: "worker-1",
         displayName: "Amy",
         currentStatus: "available",
+        workerSessions: [{ checkedOutAt: null }],
         turns: [{ id: "turn-1", status: "completed", startedAt: "2026-05-12T14:00:00.000Z", endedAt: "2026-05-12T15:00:00.000Z" }],
         saleItems: [{ finalServiceCents: 5000, tipCents: 1000 }],
       },
@@ -842,6 +1177,7 @@ describe("local API CRUD routes", () => {
         id: "worker-2",
         displayName: "Bella",
         currentStatus: "available",
+        workerSessions: [{ checkedOutAt: null }],
         turns: [],
         saleItems: [],
       },
@@ -849,13 +1185,14 @@ describe("local API CRUD routes", () => {
         id: "worker-3",
         displayName: "Cindy",
         currentStatus: "in_service",
+        workerSessions: [{ checkedOutAt: null }],
         turns: [{ id: "turn-3", status: "in_service", startedAt: "2026-05-12T15:30:00.000Z" }],
         saleItems: [],
       },
     ]);
     const app = await buildServer({ db, logger: false });
 
-    const response = await app.inject({ method: "GET", url: "/api/turns/dashboard" });
+    const response = await app.inject({ method: "GET", url: "/api/turns/dashboard?currentSessionOnly=true" });
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
@@ -913,6 +1250,41 @@ describe("local API CRUD routes", () => {
     });
   });
 
+  it("excludes workers who are not clocked in from turn suggestions", async () => {
+    const { db } = createFakeDbWithWorkers([
+      {
+        id: "worker-1",
+        displayName: "Amy",
+        currentStatus: "available",
+        workerSessions: [{ checkedOutAt: null }],
+        turns: [],
+        saleItems: [],
+      },
+      {
+        id: "worker-2",
+        displayName: "Bella",
+        currentStatus: "available",
+        workerSessions: [{ checkedOutAt: new Date("2026-05-12T17:00:00.000Z") }],
+        turns: [],
+        saleItems: [],
+      },
+      {
+        id: "worker-3",
+        displayName: "Cindy",
+        currentStatus: "available",
+        workerSessions: [],
+        turns: [],
+        saleItems: [],
+      },
+    ]);
+    const app = await buildServer({ db, logger: false });
+
+    const response = await app.inject({ method: "POST", url: "/api/turns/suggest" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().workers.map((worker: { workerId: string }) => worker.workerId)).toEqual(["worker-1"]);
+  });
+
   it("returns paid sales for a selected calendar day range", async () => {
     const { db } = createReportFakeDb();
     const app = await buildServer({ db, logger: false });
@@ -931,6 +1303,25 @@ describe("local API CRUD routes", () => {
       },
       sales: [{ id: "sale-paid" }],
     });
+  });
+
+  it("filters the sales report by approved payment method", async () => {
+    const { db } = createReportFakeDb();
+    const app = await buildServer({ db, logger: false });
+
+    const matching = await app.inject({
+      method: "GET",
+      url: "/api/reports/sales?start=2026-05-31T00:00:00&end=2026-06-01T00:00:00&paymentMethod=card",
+    });
+    const missing = await app.inject({
+      method: "GET",
+      url: "/api/reports/sales?start=2026-05-31T00:00:00&end=2026-06-01T00:00:00&paymentMethod=cash",
+    });
+
+    expect(matching.statusCode).toBe(200);
+    expect(matching.json().sales).toEqual([expect.objectContaining({ id: "sale-paid" })]);
+    expect(missing.statusCode).toBe(200);
+    expect(missing.json().sales).toEqual([]);
   });
 
   it("filters sales ticket lines and totals by worker", async () => {
@@ -1009,6 +1400,7 @@ describe("local API CRUD routes", () => {
         services: 1,
         netSalesCents: 12000,
         commissionCents: 7200,
+        commissionRates: [0.6],
         tipsCents: 1000,
         totalPayCents: 8200,
       })]));
@@ -1030,11 +1422,83 @@ describe("local API CRUD routes", () => {
         services: 1,
         netSalesCents: 8000,
         commissionCents: 4000,
+        commissionRates: [0.5],
         tipsCents: 500,
         totalPayCents: 4500,
       }],
     });
     expect(response.json().workers).toHaveLength(1);
+  });
+
+  it("returns payment report rows and approved totals", async () => {
+    const { db } = createReportFakeDb();
+    const app = await buildServer({ db, logger: false });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/reports/payments?start=2026-05-31T00:00:00&end=2026-06-01T00:00:00&paymentMethod=card",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      summary: {
+        cardTotalCents: 21500,
+        totalApprovedCents: 21500,
+        byProvider: { clover: { approved: 21500 } },
+      },
+      payments: [{
+        id: "payment-card",
+        customerName: "Mary",
+        method: "card",
+        provider: "clover",
+        amountCents: 21500,
+        status: "approved",
+      }],
+    });
+  });
+
+  it("returns refund report rows and totals", async () => {
+    const { db } = createReportFakeDb();
+    const app = await buildServer({ db, logger: false });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/reports/refunds?start=2026-05-31T00:00:00&end=2026-06-01T00:00:00",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      summary: { refundTotalCents: 2000, refundCount: 1 },
+      refunds: [{
+        id: "refund-1",
+        customerName: "Mary",
+        amountCents: 2000,
+        reason: "Owner approved correction",
+        paymentMethod: "card",
+      }],
+    });
+  });
+
+  it("returns discount report rows and totals", async () => {
+    const { db } = createReportFakeDb();
+    const app = await buildServer({ db, logger: false });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/reports/discounts?start=2026-05-31T00:00:00&end=2026-06-01T00:00:00",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      summary: { discountTotalCents: 1000, discountCount: 1 },
+      discounts: [{
+        id: "discount-1",
+        customerName: "Mary",
+        serviceName: "Deluxe Pedicure",
+        amountCents: 1000,
+        reason: "Loyalty",
+      }],
+    });
   });
 
   it("end-of-day report is based on completed paid sales", async () => {
@@ -1210,6 +1674,56 @@ describe("local API CRUD routes", () => {
     expect(response.statusCode).toBe(201);
     expect(state.sale.status).toBe("open");
     expect(state.sale.amountPaidCents).toBe(0);
+  });
+
+  it("recovers pending card payment by Clover externalPaymentId", async () => {
+    const { db, state } = createCheckoutFakeDb();
+    state.sale.items.push({ id: "item-1", priceCents: 12000, discountCents: 0, tipCents: 0, status: "active" });
+    state.sale.payments.push({
+      id: "payment-1",
+      saleId: "sale-1",
+      method: "card",
+      amountCents: 12000,
+      status: "pending",
+      idempotencyKey: "recover-card",
+      rawProviderReference: { externalPaymentId: "recover-card", saleId: "sale-1" },
+      createdAt: new Date("2026-05-31T15:00:00.000Z"),
+    });
+    const app = await buildServer({
+      db,
+      logger: false,
+      terminal: {
+        verifyConnection: async () => ({ connected: true, provider: "mock" }),
+        startSale: async () => ({ status: "failed" }),
+        cancelCurrentAction: async () => undefined,
+        refund: async () => ({ status: "approved" }),
+        reconcile: async () => ({
+          provider: "mock",
+          cardTotalCents: 12000,
+          payments: [{
+            status: "approved",
+            provider: "mock",
+            providerPaymentId: "mock-provider-payment",
+            externalPaymentId: "recover-card",
+            providerOrderId: "mock-order-sale-1",
+            saleId: "sale-1",
+            baseAmountCents: 12000,
+            tipCents: 0,
+            totalChargedCents: 12000,
+          }],
+        }),
+      },
+    });
+
+    const response = await app.inject({ method: "POST", url: "/api/payments/payment-1/reconcile" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ terminalStatus: "approved" });
+    expect(state.sale.payments[0]).toMatchObject({
+      status: "approved",
+      providerPaymentId: "mock-provider-payment",
+      amountCents: 12000,
+    });
   });
 
   it("rejects underpaid sale completion", async () => {

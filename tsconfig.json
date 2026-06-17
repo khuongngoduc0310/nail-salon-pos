@@ -3,9 +3,11 @@
   "references": [
     { "path": "./packages/shared" },
     { "path": "./packages/payment-terminal" },
+    { "path": "./packages/clover-payment" },
     { "path": "./packages/receipt-printer" },
     { "path": "./packages/db" },
     { "path": "./apps/local-api" },
+    { "path": "./apps/mock-clover-device" },
     { "path": "./apps/owner-pos" },
     { "path": "./apps/worker-pwa" },
     { "path": "./apps/customer-pwa" }

@@ -16,6 +16,7 @@ export type DbClient = {
     findFirst(args?: unknown): Promise<unknown | null>;
     findUnique(args: unknown): Promise<unknown | null>;
     create(args: unknown): Promise<unknown>;
+    update(args: unknown): Promise<unknown>;
   };
   worker: {
     findMany(args?: unknown): Promise<unknown[]>;
@@ -56,7 +57,9 @@ export type DbClient = {
   };
   payment: {
     findMany(args?: unknown): Promise<unknown[]>;
+    findUnique(args: unknown): Promise<unknown | null>;
     create(args: unknown): Promise<unknown>;
+    update(args: unknown): Promise<unknown>;
   };
   discount: {
     findMany(args?: unknown): Promise<unknown[]>;
