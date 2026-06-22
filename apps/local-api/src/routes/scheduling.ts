@@ -1,10 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { DbClient } from "../db.js";
-<<<<<<< HEAD
 import { broadcast } from "../ws/events.js";
-=======
-import { normalizePhone } from "../phone.js";
->>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
 import {
   asObject,
   getParams,
@@ -34,10 +30,6 @@ const checkinStatuses = new Set([
   "cancelled",
   "no_show",
 ]);
-
-type WorkSessionRecord = {
-  id: string;
-};
 
 export async function registerSchedulingRoutes(app: FastifyInstance, db: DbClient) {
   app.post("/api/appointments", async (request, reply) => {
@@ -131,29 +123,12 @@ export async function registerSchedulingRoutes(app: FastifyInstance, db: DbClien
       const body = asObject(request.body);
       const checkin = await db.$transaction(async (tx) => {
         const customerId = await resolveCustomerId(tx, body);
-        const appointmentId = optionalString(body.appointmentId, "appointmentId");
-        const requestedWorkerId = optionalString(body.requestedWorkerId, "requestedWorkerId");
-        let sessionId: string | undefined;
-
-        if (!appointmentId) {
-          const sessions = (await tx.workSession.findMany({
-            where: { status: "open" },
-            orderBy: [{ openedAt: "desc" }],
-            take: 1,
-          })) as WorkSessionRecord[];
-          const openSession = sessions[0];
-          if (!openSession) {
-            throw new HttpError(409, "no open work session");
-          }
-          sessionId = openSession.id;
-        }
 
         return tx.checkin.create({
           data: {
-            sessionId,
             customerId,
-            appointmentId,
-            requestedWorkerId,
+            appointmentId: optionalString(body.appointmentId, "appointmentId"),
+            requestedWorkerId: optionalString(body.requestedWorkerId, "requestedWorkerId"),
             notes: optionalString(body.notes, "notes"),
             status: optionalStatus(body.status, checkinStatuses, "status") ?? "waiting",
           },
@@ -225,7 +200,7 @@ async function resolveCustomerId(db: DbClient, body: Record<string, unknown>): P
   const created = await db.customer.create({
     data: {
       name: requiredString(customer.name, "customer.name"),
-      phone: normalizePhone(requiredString(customer.phone, "customer.phone")),
+      phone: optionalString(customer.phone, "customer.phone"),
       email: optionalString(customer.email, "customer.email"),
     },
   });

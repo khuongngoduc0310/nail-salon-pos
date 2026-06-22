@@ -170,11 +170,7 @@ Checkout supports:
 - Multiple workers on one sale.
 - One-time custom checkout services with owner-entered name and price; these are temporary sale items and are not added to the service catalog.
 - Discount per sale or sale item.
-<<<<<<< HEAD
 - Tips must not be determined or prefilled when sale items are added; Clover/payment-terminal tip flow determines any card tip after the sale is sent for payment. When Clover returns a card tip, Owner POS prompts the owner to allocate it either evenly between workers or by percentage of discounted service amount. If split evenly between workers, each worker's share is automatically distributed across that worker's services by percentage of discounted service amount. Approved allocated tips are attributed to sale items for worker/service reporting.
-=======
-- Tip per worker/service (distributed after card payment).
->>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
 - Printed receipt.
 - Refund tracking.
 - Date/time reporting.
@@ -189,36 +185,6 @@ Clover card: $60
 ```
 
 Only the card portion goes to Clover.
-
-### Owner POS checkout UI rules
-
-The Owner POS checkout screen is designed for touch-screen use (Windows or iPad). No dropdown menus are used in the checkout flow.
-
-Order-building flow:
-
-1. Owner taps a ready-for-checkout customer to open a draft sale.
-2. Owner taps a worker first, then taps a service to add that service line item to the order. If no worker is selected, the POS shows a notification.
-3. Owner can add multiple services for multiple workers in the same order.
-4. To reassign a worker on an existing line item, owner taps the item then taps the new worker. Only that one line item changes.
-5. Owner taps "Proceed to payment" when the order is complete.
-
-Payment flow:
-
-1. Owner sees balance due and three payment buttons: Cash, Gift Card, and Card.
-2. Tapping Cash or Gift Card opens an on-screen numpad. Cash and gift card payments have no tip; they reduce the balance due.
-3. Tapping Card sends the remaining balance to the Clover Mini. The customer sees the total on the Clover screen and enters their tip directly on the terminal.
-4. When the card is approved, the Clover Mini returns the approved tip amount.
-5. The POS immediately shows a tip distribution screen.
-
-### Tip distribution rules
-
-- Tips are only collected via the Clover Mini card terminal. Cash and gift card payments carry no tip.
-- After card approval, the POS auto-distributes the terminal tip across workers proportional to each worker's share of the sale subtotal (after discounts).
-- Workers whose services have a $0 net price receive $0 tip by default.
-- The owner can tap any worker row to adjust that worker's tip amount using an on-screen numpad. The remaining tip is immediately rebalanced across all other workers proportionally by their service amounts. The total always remains locked to the amount the terminal approved.
-- Once the owner confirms the tip distribution, each sale item's `tipCents` is updated and the sale total is recalculated.
-- If tip adjustment leaves a rounding remainder, it is assigned to the last worker in the list.
-- If a sale is paid entirely by cash or gift card, no tip distribution step occurs.
 
 ## Receipts
 

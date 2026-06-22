@@ -3,26 +3,17 @@ import { config as loadEnv } from "dotenv";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import Fastify, { type FastifyServerOptions } from "fastify";
-<<<<<<< HEAD
 import type { PaymentTerminalAdapter } from "@nail/payment-terminal";
 import { MockReceiptPrinterAdapter } from "@nail/receipt-printer";
-=======
-import { MockTerminalAdapter, type PaymentTerminalAdapter } from "@nail/payment-terminal";
-import { MockReceiptPrinterAdapter, type ReceiptPrinterAdapter } from "@nail/receipt-printer";
->>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
 import { createDbClient, type DbClient } from "./db.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerCatalogRoutes } from "./routes/catalog.js";
 import { registerCheckoutRoutes } from "./routes/checkout.js";
-import { registerCustomerRoutes } from "./routes/customer.js";
 import { registerPeopleRoutes } from "./routes/people.js";
 import { registerReportRoutes } from "./routes/reports.js";
 import { registerSchedulingRoutes } from "./routes/scheduling.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
-<<<<<<< HEAD
 import { registerSettingsRoutes } from "./routes/settings.js";
-=======
->>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
 import { registerTurnRoutes } from "./routes/turns.js";
 import { registerWorkerDashboardRoutes } from "./routes/worker-dashboard.js";
 import {
@@ -39,21 +30,15 @@ export type ServerOptions = {
   db?: DbClient;
   logger?: FastifyServerOptions["logger"];
   terminal?: PaymentTerminalAdapter;
-  printer?: ReceiptPrinterAdapter;
 };
 
 export async function buildServer(options: ServerOptions = {}) {
   const app = Fastify({ logger: options.logger ?? true });
   const db = options.db ?? createDbClient();
-<<<<<<< HEAD
   const terminal = options.terminal instanceof RuntimePaymentTerminalManager
     ? options.terminal
     : createConfiguredPaymentTerminalManager(options.terminal);
   const printer = new MockReceiptPrinterAdapter();
-=======
-  const terminal = options.terminal ?? new MockTerminalAdapter();
-  const printer = options.printer ?? new MockReceiptPrinterAdapter();
->>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
 
   await app.register(cors, { origin: true });
   await app.register(websocket);
@@ -101,30 +86,20 @@ export async function buildServer(options: ServerOptions = {}) {
 
   // Receipt mock
   app.post("/api/receipts/mock/status", async () => ({
-    printedReceiptCount: "printedReceipts" in printer && Array.isArray(printer.printedReceipts) ? printer.printedReceipts.length : 0,
+    printedReceiptCount: printer.printedReceipts.length,
   }));
 
   // Register all route modules
   await registerAuthRoutes(app, db);
   await registerCatalogRoutes(app, db);
-  await registerSessionRoutes(app, db);
   await registerPeopleRoutes(app, db);
-<<<<<<< HEAD
   await registerReportRoutes(app, db);
-=======
-  await registerCustomerRoutes(app, db);
->>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
   await registerSchedulingRoutes(app, db);
   await registerSessionRoutes(app, db);
   await registerSettingsRoutes(app, db);
   await registerTurnRoutes(app, db);
-<<<<<<< HEAD
   await registerWorkerDashboardRoutes(app, db);
   await registerCheckoutRoutes(app, db, terminal);
-=======
-  await registerCheckoutRoutes(app, db, terminal, printer);
-  await registerReportRoutes(app, db);
->>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
 
   return app;
 }

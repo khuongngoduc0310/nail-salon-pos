@@ -1,9 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { scryptSync } from "node:crypto";
 import { MockTerminalAdapter } from "@nail/payment-terminal";
-import { MockReceiptPrinterAdapter } from "@nail/receipt-printer";
 import { buildServer } from "./server.js";
-import { hashSecret, issueOwnerToken } from "./auth.js";
 import type { DbClient } from "./db.js";
 import { hashPin } from "./routes/pin.js";
 
@@ -52,48 +49,26 @@ function createFakeDb() {
   const db = {
     serviceCategory: makeModel("serviceCategory"),
     service: makeModel("service"),
-<<<<<<< HEAD
     user: makeModel("user"),
-=======
-    user: { findMany: makeModel("user").findMany, create: makeModel("user").create },
->>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
     worker: makeModel("worker"),
     customer: makeModel("customer"),
     appointment: makeModel("appointment"),
     checkin: makeModel("checkin"),
-    workSession: makeModel("workSession"),
-    workerSessionCheckin: makeModel("workerSessionCheckin"),
     turn: makeModel("turn"),
     sale: makeModel("sale"),
     saleItem: makeModel("saleItem"),
-<<<<<<< HEAD
     payment: makeModel("payment"),
     discount: makeModel("discount"),
     refund: makeModel("refund"),
     session: makeModel("session"),
     workerSession: makeModel("workerSession"),
-=======
-    payment: {
-      findMany: makeModel("payment").findMany,
-      findUnique: makeModel("payment").findUnique,
-      create: makeModel("payment").create,
-      update: makeModel("payment").update,
-    },
-    receipt: {
-      findMany: makeModel("receipt").findMany,
-      create: makeModel("receipt").create,
-      update: makeModel("receipt").update,
-    },
-    discount: { findMany: makeModel("discount").findMany, create: makeModel("discount").create },
-    refund: { findMany: makeModel("refund").findMany, create: makeModel("refund").create },
->>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
     $transaction: async <T>(callback: (tx: DbClient) => Promise<T>): Promise<T> => callback(db),
   } as unknown as DbClient;
 
   return { db, calls };
 }
 
-function createFakeDbWithWorkers(workers: unknown[], sessions: unknown[] = []) {
+function createFakeDbWithWorkers(workers: unknown[]) {
   const calls: Call[] = [];
   let id = 1;
   const nextId = () => `id-${id++}`;
@@ -132,94 +107,37 @@ function createFakeDbWithWorkers(workers: unknown[], sessions: unknown[] = []) {
   const db = {
     serviceCategory: makeModel("serviceCategory"),
     service: makeModel("service"),
-<<<<<<< HEAD
     user: makeModel("user"),
-=======
-    user: { findMany: makeModel("user").findMany, create: makeModel("user").create },
->>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
     worker: makeModel("worker", workers),
     customer: makeModel("customer"),
     appointment: makeModel("appointment"),
     checkin: makeModel("checkin"),
-    workSession: makeModel("workSession", sessions),
-    workerSessionCheckin: makeModel("workerSessionCheckin"),
     turn: makeModel("turn"),
     sale: makeModel("sale"),
     saleItem: makeModel("saleItem"),
-<<<<<<< HEAD
     payment: makeModel("payment"),
     discount: makeModel("discount"),
     refund: makeModel("refund"),
     session: makeModel("session"),
     workerSession: makeModel("workerSession"),
-=======
-    payment: {
-      findMany: makeModel("payment").findMany,
-      findUnique: makeModel("payment").findUnique,
-      create: makeModel("payment").create,
-      update: makeModel("payment").update,
-    },
-    receipt: {
-      findMany: makeModel("receipt").findMany,
-      create: makeModel("receipt").create,
-      update: makeModel("receipt").update,
-    },
-    discount: { findMany: makeModel("discount").findMany, create: makeModel("discount").create },
-    refund: { findMany: makeModel("refund").findMany, create: makeModel("refund").create },
->>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
     $transaction: async <T>(callback: (tx: DbClient) => Promise<T>): Promise<T> => callback(db),
   } as unknown as DbClient;
 
   return { db, calls };
 }
 
-function createCheckoutFakeDb(input?: {
-  sessions?: Array<Record<string, unknown>>;
-  checkins?: Array<Record<string, unknown>>;
-}) {
+function createCheckoutFakeDb() {
   const calls: Call[] = [];
   let id = 1;
-  const sessions = [...(input?.sessions ?? [])];
-  const checkins = [...(input?.checkins ?? [])];
   const state = {
     sale: {
       id: "sale-1",
-      checkinId: "checkin-1" as string | null | undefined,
-      sessionId: undefined as string | undefined,
-      customerId: "customer-1",
+      checkinId: "checkin-1",
       status: "open",
       totalCents: 0,
       amountPaidCents: 0,
-<<<<<<< HEAD
       items: [] as Array<{ id: string; priceCents: number; discountCents: number; tipCents: number; status: string }>,
       payments: [] as Array<{ id?: string; saleId?: string; method: "cash" | "card" | "gift_card"; amountCents: number; status: "pending" | "approved" | "declined" | "cancelled" | "failed"; providerPaymentId?: string; idempotencyKey?: string; rawProviderReference?: unknown; createdAt?: Date }>,
-=======
-      items: [] as Array<{
-        id: string;
-        workerId?: string;
-        priceCents: number;
-        discountCents: number;
-        tipCents: number;
-        status: string;
-      }>,
-      payments: [] as Array<{
-        id?: string;
-        method: "cash" | "card" | "gift_card";
-        amountCents: number;
-        tipCents?: number;
-        status: "approved" | "declined" | "cancelled" | "failed";
-        providerPaymentId?: string;
-      }>,
-      refunds: [] as Array<{
-        id: string;
-        saleId: string;
-        paymentId?: string;
-        amountCents: number;
-        reason?: string;
-        providerRefundId?: string;
-      }>,
-      receipts: [] as Array<Record<string, unknown>>,
->>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
     },
   };
   const nextId = (prefix: string) => `${prefix}-${id++}`;
@@ -242,11 +160,7 @@ function createCheckoutFakeDb(input?: {
         };
       },
     },
-<<<<<<< HEAD
     user: emptyModel("user", calls),
-=======
-    user: { findMany: emptyModel("user", calls).findMany, create: emptyModel("user", calls).create },
->>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
     worker: {
       ...emptyModel("worker", calls),
       findUnique: async (args: unknown) => {
@@ -256,29 +170,9 @@ function createCheckoutFakeDb(input?: {
     },
     customer: emptyModel("customer", calls),
     appointment: emptyModel("appointment", calls),
-    checkin: {
-      ...emptyModel("checkin", calls),
-      findMany: async (args?: unknown) => {
-        calls.push({ model: "checkin", method: "findMany", args });
-        const where = ((args as { where?: Record<string, unknown> } | undefined)?.where ?? {}) as Record<string, unknown>;
-        return checkins.filter((checkin) => (typeof where.id === "string" ? checkin.id === where.id : true));
-      },
-    },
-    workSession: {
-      ...emptyModel("workSession", calls),
-      findMany: async (args?: unknown) => {
-        calls.push({ model: "workSession", method: "findMany", args });
-        const where = ((args as { where?: Record<string, unknown> } | undefined)?.where ?? {}) as Record<string, unknown>;
-        return sessions.filter((session) => (typeof where.status === "string" ? session.status === where.status : true));
-      },
-    },
-    workerSessionCheckin: emptyModel("workerSessionCheckin", calls),
+    checkin: emptyModel("checkin", calls),
     turn: emptyModel("turn", calls),
     sale: {
-      findMany: async (args?: unknown) => {
-        calls.push({ model: "sale", method: "findMany", args });
-        return [{ ...state.sale }];
-      },
       findUnique: async (args: unknown) => {
         calls.push({ model: "sale", method: "findUnique", args });
         const includeItems = (args as { include?: { items?: { where?: { status?: string } } } }).include?.items;
@@ -315,45 +209,27 @@ function createCheckoutFakeDb(input?: {
       },
       update: async (args: unknown) => {
         calls.push({ model: "saleItem", method: "update", args });
-<<<<<<< HEAD
         const id = (args as { where?: { id?: string }; data?: { status?: string } }).where?.id;
         const item = state.sale.items.find((saleItem) => saleItem.id === id) ?? state.sale.items[0];
         if (item && (args as { data?: { status?: string } }).data?.status) {
           item.status = (args as { data: { status: string } }).data.status;
         }
         return item ?? { id: "item-1", args };
-=======
-        const where = (args as { where?: { id?: string } }).where;
-        const data = (args as { data?: { tipCents?: number } }).data;
-        if (where?.id && typeof data?.tipCents === "number") {
-          const index = state.sale.items.findIndex((item) => item.id === where.id);
-          if (index >= 0) state.sale.items[index] = { ...state.sale.items[index], tipCents: data.tipCents };
-        }
-        return { id: where?.id ?? "item-1", args };
->>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
       },
     },
     payment: {
       findMany: async (args?: unknown) => {
         calls.push({ model: "payment", method: "findMany", args });
-<<<<<<< HEAD
         return [];
       },
       findUnique: async (args: unknown) => {
         calls.push({ model: "payment", method: "findUnique", args });
         const id = (args as { where?: { id?: string } }).where?.id;
         return state.sale.payments.find((payment) => (payment as { id?: string }).id === id) ?? null;
-=======
-        const where = ((args as { where?: Record<string, unknown> } | undefined)?.where ?? {}) as Record<string, unknown>;
-        return state.sale.payments
-          .filter((payment) => (typeof where.status === "string" ? payment.status === where.status : true))
-          .map((payment) => ({ id: nextId("payment"), saleId: state.sale.id, ...payment }));
->>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
       },
       create: async (args: unknown) => {
         calls.push({ model: "payment", method: "create", args });
         const data = (args as {
-<<<<<<< HEAD
           data: { method: "cash" | "card" | "gift_card"; amountCents: number; status: "pending" | "approved" | "declined" | "cancelled" | "failed" };
         }).data;
         const payment = { id: nextId("payment"), ...data };
@@ -365,81 +241,9 @@ function createCheckoutFakeDb(input?: {
         const id = (args as { where?: { id?: string }; data: Record<string, unknown> }).where?.id;
         const payment = state.sale.payments.find((candidate) => (candidate as { id?: string }).id === id) ?? state.sale.payments[0];
         Object.assign(payment, (args as { data: Record<string, unknown> }).data);
-=======
-          data: {
-            method: "cash" | "card" | "gift_card";
-            amountCents: number;
-            tipCents?: number;
-            status: "approved" | "declined" | "cancelled" | "failed";
-          };
-        }).data;
-        const payment = { id: nextId("payment"), ...data };
-        state.sale.payments.push(payment);
->>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
         return payment;
       },
-      findUnique: async (args: unknown) => {
-        calls.push({ model: "payment", method: "findUnique", args });
-        const where = ((args as { where?: Record<string, unknown> }).where ?? {}) as Record<string, unknown>;
-        return state.sale.payments.find((payment) => payment.id === where.id) ?? null;
-      },
-      update: async (args: unknown) => {
-        calls.push({ model: "payment", method: "update", args });
-        const where = ((args as { where?: Record<string, unknown> }).where ?? {}) as Record<string, unknown>;
-        const data = ((args as { data?: Record<string, unknown> }).data ?? {}) as Record<string, unknown>;
-        const index = state.sale.payments.findIndex((payment) => payment.id === where.id);
-        if (index >= 0) state.sale.payments[index] = { ...state.sale.payments[index], ...data };
-        return index >= 0 ? state.sale.payments[index] : { id: where.id, ...data };
-      },
     },
-    receipt: {
-      findMany: async (args?: unknown) => {
-        calls.push({ model: "receipt", method: "findMany", args });
-        const where = ((args as { where?: Record<string, unknown> } | undefined)?.where ?? {}) as Record<string, unknown>;
-        return state.sale.receipts.filter((receipt) => {
-          if (typeof where.id === "string" && receipt.id !== where.id) return false;
-          if (typeof where.saleId === "string" && receipt.saleId !== where.saleId) return false;
-          return true;
-        });
-      },
-      create: async (args: unknown) => {
-        calls.push({ model: "receipt", method: "create", args });
-        const data = ((args as { data?: Record<string, unknown> }).data ?? {}) as Record<string, unknown>;
-        const receipt = { id: nextId("receipt"), createdAt: new Date().toISOString(), ...data };
-        state.sale.receipts.unshift(receipt);
-        return receipt;
-      },
-      update: async (args: unknown) => {
-        calls.push({ model: "receipt", method: "update", args });
-        const where = ((args as { where?: Record<string, unknown> }).where ?? {}) as Record<string, unknown>;
-        const data = ((args as { data?: Record<string, unknown> }).data ?? {}) as Record<string, unknown>;
-        const index = state.sale.receipts.findIndex((receipt) => receipt.id === where.id);
-        if (index >= 0) state.sale.receipts[index] = { ...state.sale.receipts[index], ...data };
-        return index >= 0 ? state.sale.receipts[index] : { id: where.id, ...data };
-      },
-    },
-    discount: { findMany: emptyModel("discount", calls).findMany, create: emptyModel("discount", calls).create },
-    refund: {
-      findMany: async (args?: unknown) => {
-        calls.push({ model: "refund", method: "findMany", args });
-        return state.sale.refunds.map((refund) => ({ ...refund }));
-      },
-      create: async (args: unknown) => {
-        calls.push({ model: "refund", method: "create", args });
-        const data = ((args as { data?: Record<string, unknown> }).data ?? {}) as Record<string, unknown>;
-        const refund = {
-          id: nextId("refund"),
-          saleId: String(data.saleId),
-          paymentId: typeof data.paymentId === "string" ? data.paymentId : undefined,
-          amountCents: Number(data.amountCents),
-          reason: typeof data.reason === "string" ? data.reason : undefined,
-          providerRefundId: typeof data.providerRefundId === "string" ? data.providerRefundId : undefined,
-        };
-        state.sale.refunds.push(refund);
-        return refund;
-      },
-    },
-<<<<<<< HEAD
     discount: emptyModel("discount", calls),
     refund: emptyModel("refund", calls),
     session: emptyModel("session", calls),
@@ -450,8 +254,6 @@ function createCheckoutFakeDb(input?: {
         return { id: "worker-session-1" };
       },
     },
-=======
->>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
     $transaction: async <T>(callback: (tx: DbClient) => Promise<T>): Promise<T> => callback(db),
   } as unknown as DbClient;
 
@@ -804,216 +606,6 @@ function emptyModel(model: string, calls: Call[]) {
   };
 }
 
-function createSessionStateDb(input?: {
-  sessions?: Array<Record<string, unknown>>;
-  checkins?: Array<Record<string, unknown>>;
-  workerSessionCheckins?: Array<Record<string, unknown>>;
-  sales?: Array<Record<string, unknown>>;
-  turns?: Array<Record<string, unknown>>;
-}) {
-  const calls: Call[] = [];
-  let id = 1;
-  const nextId = () => `id-${id++}`;
-  const sessions = [...(input?.sessions ?? [])];
-  const checkins = [...(input?.checkins ?? [])];
-  const workerSessionCheckins = [...(input?.workerSessionCheckins ?? [])];
-  const sales = [...(input?.sales ?? [])];
-  const turns = [...(input?.turns ?? [])];
-
-  const matchesWhere = (row: Record<string, unknown>, where: Record<string, unknown>): boolean => {
-    if (typeof where.id === "string" && row.id !== where.id) return false;
-    if (typeof where.sessionId === "string" && row.sessionId !== where.sessionId) return false;
-    if (typeof where.workerId === "string" && row.workerId !== where.workerId) return false;
-    if (typeof where.requestedWorkerId === "string" && row.requestedWorkerId !== where.requestedWorkerId) return false;
-    if (typeof where.status === "string" && row.status !== where.status) return false;
-    if (where.businessDate instanceof Date) {
-      if (!(row.businessDate instanceof Date || typeof row.businessDate === "string")) return false;
-      if (new Date(row.businessDate).getTime() !== where.businessDate.getTime()) return false;
-    }
-    const statusFilter = where.status as { in?: string[] } | undefined;
-    if (statusFilter?.in && !statusFilter.in.includes(String(row.status))) return false;
-    if (where.checkin && typeof where.checkin === "object") {
-      const checkinFilter = where.checkin as { sessionId?: string };
-      if (typeof checkinFilter.sessionId === "string") {
-        const saleCheckin = checkins.find((checkin) => checkin.id === row.checkinId);
-        if (!saleCheckin || saleCheckin.sessionId !== checkinFilter.sessionId) return false;
-      }
-    }
-    const orClauses = Array.isArray(where.OR) ? (where.OR as Array<Record<string, unknown>>) : null;
-    if (orClauses && orClauses.length > 0) {
-      return orClauses.some((clause) => matchesWhere(row, clause));
-    }
-    return true;
-  };
-
-  const byWhere = (rows: Array<Record<string, unknown>>, where: Record<string, unknown> | undefined) => {
-    if (!where) return rows;
-    return rows.filter((row) => matchesWhere(row, where));
-  };
-
-  const db: DbClient = {
-    serviceCategory: emptyModel("serviceCategory", calls),
-    service: emptyModel("service", calls),
-    user: { findMany: emptyModel("user", calls).findMany, create: emptyModel("user", calls).create },
-    worker: emptyModel("worker", calls),
-    customer: {
-      ...emptyModel("customer", calls),
-      create: async (args: unknown) => {
-        calls.push({ model: "customer", method: "create", args });
-        return { id: nextId(), ...((args as { data?: Record<string, unknown> }).data ?? {}) };
-      },
-    },
-    appointment: emptyModel("appointment", calls),
-    checkin: {
-      findMany: async (args?: unknown) => {
-        calls.push({ model: "checkin", method: "findMany", args });
-        const where = (args as { where?: Record<string, unknown> } | undefined)?.where;
-        return byWhere(checkins, where).map((row) => ({ ...row }));
-      },
-      create: async (args: unknown) => {
-        calls.push({ model: "checkin", method: "create", args });
-        const data = ((args as { data?: Record<string, unknown> }).data ?? {}) as Record<string, unknown>;
-        const created = { id: nextId(), status: "waiting", ...data };
-        checkins.push(created);
-        return created;
-      },
-      update: async (args: unknown) => {
-        calls.push({ model: "checkin", method: "update", args });
-        const where = ((args as { where?: Record<string, unknown> }).where ?? {}) as Record<string, unknown>;
-        const data = ((args as { data?: Record<string, unknown> }).data ?? {}) as Record<string, unknown>;
-        const index = checkins.findIndex((row) => row.id === where.id);
-        if (index >= 0) checkins[index] = { ...checkins[index], ...data };
-        return index >= 0 ? { ...checkins[index] } : { id: where.id ?? "missing", ...data };
-      },
-    },
-    workSession: {
-      findMany: async (args?: unknown) => {
-        calls.push({ model: "workSession", method: "findMany", args });
-        const parsed = (args as {
-          where?: Record<string, unknown>;
-          include?: Record<string, unknown>;
-          take?: number;
-          orderBy?: Array<Record<string, "asc" | "desc">>;
-        } | undefined) ?? {};
-        let rows = byWhere(sessions, parsed.where);
-        if (Array.isArray(parsed.orderBy)) {
-          rows = [...rows].sort((left, right) => {
-            for (const order of parsed.orderBy ?? []) {
-              const [field, direction] = Object.entries(order)[0] ?? [];
-              if (!field || !direction) continue;
-              const leftValue = left[field];
-              const rightValue = right[field];
-              if (leftValue === rightValue) continue;
-              const leftTime = leftValue ? new Date(String(leftValue)).getTime() : Number.NEGATIVE_INFINITY;
-              const rightTime = rightValue ? new Date(String(rightValue)).getTime() : Number.NEGATIVE_INFINITY;
-              if (leftTime === rightTime) continue;
-              return direction === "desc" ? rightTime - leftTime : leftTime - rightTime;
-            }
-            return 0;
-          });
-        }
-        if (typeof parsed.take === "number") rows = rows.slice(0, parsed.take);
-        if (parsed.include?.checkins) {
-          return rows.map((row) => ({
-            ...row,
-            checkins: checkins
-              .filter((checkin) => checkin.sessionId === row.id)
-              .map((checkin) => ({ requestedWorkerId: checkin.requestedWorkerId ?? null })),
-          }));
-        }
-        if (parsed.include?.workerCheckins) {
-          return rows.map((row) => ({
-            ...row,
-            workerCheckins: workerSessionCheckins
-              .filter((checkin) => checkin.sessionId === row.id)
-              .sort((left, right) => {
-                const leftTime = left.checkedInAt ? new Date(String(left.checkedInAt)).getTime() : 0;
-                const rightTime = right.checkedInAt ? new Date(String(right.checkedInAt)).getTime() : 0;
-                return leftTime - rightTime;
-              })
-              .map((checkin) => ({
-                workerId: String(checkin.workerId),
-                checkedInAt: checkin.checkedInAt ? String(checkin.checkedInAt) : undefined,
-              })),
-          }));
-        }
-        return rows.map((row) => ({ ...row }));
-      },
-      findUnique: async (args: unknown) => {
-        calls.push({ model: "workSession", method: "findUnique", args });
-        const where = ((args as { where?: Record<string, unknown> }).where ?? {}) as Record<string, unknown>;
-        const found = sessions.find((row) => row.id === where.id);
-        return found ? { ...found } : null;
-      },
-      create: async (args: unknown) => {
-        calls.push({ model: "workSession", method: "create", args });
-        const data = ((args as { data?: Record<string, unknown> }).data ?? {}) as Record<string, unknown>;
-        const created = { id: nextId(), openedAt: new Date().toISOString(), status: "open", ...data };
-        sessions.push(created);
-        return created;
-      },
-      update: async (args: unknown) => {
-        calls.push({ model: "workSession", method: "update", args });
-        const where = ((args as { where?: Record<string, unknown> }).where ?? {}) as Record<string, unknown>;
-        const data = ((args as { data?: Record<string, unknown> }).data ?? {}) as Record<string, unknown>;
-        const index = sessions.findIndex((row) => row.id === where.id);
-        if (index >= 0) sessions[index] = { ...sessions[index], ...data };
-        return index >= 0 ? { ...sessions[index] } : { id: where.id ?? "missing", ...data };
-      },
-    },
-    workerSessionCheckin: {
-      findMany: async (args?: unknown) => {
-        calls.push({ model: "workerSessionCheckin", method: "findMany", args });
-        const where = (args as { where?: Record<string, unknown> } | undefined)?.where;
-        return byWhere(workerSessionCheckins, where).map((row) => ({ ...row }));
-      },
-      create: async (args: unknown) => {
-        calls.push({ model: "workerSessionCheckin", method: "create", args });
-        const data = ((args as { data?: Record<string, unknown> }).data ?? {}) as Record<string, unknown>;
-        const created = { id: nextId(), checkedInAt: new Date().toISOString(), ...data };
-        workerSessionCheckins.push(created);
-        return created;
-      },
-    },
-    turn: {
-      findMany: async (args?: unknown) => {
-        calls.push({ model: "turn", method: "findMany", args });
-        const where = ((args as { where?: Record<string, unknown> } | undefined)?.where ?? {}) as Record<string, unknown>;
-        return byWhere(turns, where).map((turn) => ({ ...turn }));
-      },
-      create: emptyModel("turn", calls).create,
-      update: emptyModel("turn", calls).update,
-    },
-    sale: {
-      findMany: async (args?: unknown) => {
-        calls.push({ model: "sale", method: "findMany", args });
-        const where = ((args as { where?: Record<string, unknown> } | undefined)?.where ?? {}) as Record<string, unknown>;
-        return byWhere(sales, where).map((sale) => ({ ...sale }));
-      },
-      findUnique: emptyModel("sale", calls).findUnique,
-      create: emptyModel("sale", calls).create,
-      update: emptyModel("sale", calls).update,
-    },
-    saleItem: emptyModel("saleItem", calls),
-    payment: {
-      findMany: emptyModel("payment", calls).findMany,
-      findUnique: emptyModel("payment", calls).findUnique,
-      create: emptyModel("payment", calls).create,
-      update: emptyModel("payment", calls).update,
-    },
-    receipt: {
-      findMany: emptyModel("receipt", calls).findMany,
-      create: emptyModel("receipt", calls).create,
-      update: emptyModel("receipt", calls).update,
-    },
-    discount: { findMany: emptyModel("discount", calls).findMany, create: emptyModel("discount", calls).create },
-    refund: { findMany: emptyModel("refund", calls).findMany, create: emptyModel("refund", calls).create },
-    $transaction: async <T>(callback: (tx: DbClient) => Promise<T>): Promise<T> => callback(db),
-  } satisfies DbClient;
-
-  return { db, calls, sessions, checkins, workerSessionCheckins, sales, turns };
-}
-
 describe("local API CRUD routes", () => {
   it("returns health without the database", async () => {
     const { db } = createFakeDb();
@@ -1064,11 +656,7 @@ describe("local API CRUD routes", () => {
     const response = await app.inject({
       method: "POST",
       url: "/api/workers",
-<<<<<<< HEAD
       payload: { name: "Amy", email: "amy@example.com", commissionRate: 0.6, pin: "2468" },
-=======
-      payload: { name: "Amy", email: "amy@example.com", commissionRate: 0.6, password: "1234" },
->>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
     });
 
     expect(response.statusCode).toBe(201);
@@ -1080,711 +668,6 @@ describe("local API CRUD routes", () => {
     const pinHash = (calls[0].args as { data: { pinHash: string } }).data.pinHash;
     expect(pinHash).not.toBe("2468");
     expect(calls[1]).toMatchObject({ model: "worker", method: "create" });
-    const userCreate = calls[0]?.args as { data?: { passwordHash?: string; pinHash?: string } };
-    expect(typeof userCreate.data?.passwordHash).toBe("string");
-    expect(userCreate.data?.passwordHash).toContain(":");
-    expect(userCreate.data?.pinHash).toBeUndefined();
-  });
-
-  it("authenticates a worker with password and returns private turns", async () => {
-    const salt = "testsalt1234567890";
-    const key = scryptSync("1234", salt, 64).toString("hex");
-    const workerRecord = {
-      id: "worker-1",
-      displayName: "Amy",
-      user: {
-        passwordHash: `${salt}:${key}`,
-      },
-      turns: [{ id: "turn-1", status: "completed" }],
-    };
-    const { db } = createFakeDbWithWorkers([workerRecord]);
-    const app = await buildServer({ db, logger: false });
-
-    const ok = await app.inject({
-      method: "POST",
-      url: "/api/workers/login",
-      payload: { workerId: "worker-1", password: "1234" },
-    });
-    expect(ok.statusCode).toBe(200);
-    expect(ok.json()).toMatchObject({ workerId: "worker-1", displayName: "Amy" });
-    expect(typeof (ok.json() as { token?: unknown }).token).toBe("string");
-    expect(typeof (ok.json() as { expiresAt?: unknown }).expiresAt).toBe("string");
-
-    const bad = await app.inject({
-      method: "POST",
-      url: "/api/workers/login",
-      payload: { workerId: "worker-1", password: "wrong" },
-    });
-    expect(bad.statusCode).toBe(401);
-  });
-
-  it("rejects worker protected endpoints without a token", async () => {
-    const { db } = createFakeDbWithWorkers([]);
-    const app = await buildServer({ db, logger: false });
-    const response = await app.inject({ method: "GET", url: "/api/worker/me/dashboard" });
-    expect(response.statusCode).toBe(401);
-  });
-
-  it("authenticates an owner with password", async () => {
-    const { db } = createFakeDb();
-    db.user.findMany = async () => [
-      { id: "owner-1", name: "Owner", role: "owner", active: true, passwordHash: hashSecret("1234") },
-    ];
-    const app = await buildServer({ db, logger: false });
-
-    const response = await app.inject({
-      method: "POST",
-      url: "/api/owner/login",
-      payload: { emailOrPhone: "owner@example.com", password: "1234" },
-    });
-
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({ user: { id: "owner-1", role: "owner" } });
-    expect(typeof (response.json() as { token?: unknown }).token).toBe("string");
-  });
-
-  it("rejects owner reports without an owner token", async () => {
-    const { db } = createFakeDb();
-    const app = await buildServer({ db, logger: false });
-
-    const missing = await app.inject({ method: "GET", url: "/api/reports/summary" });
-    const invalid = await app.inject({
-      method: "GET",
-      url: "/api/reports/summary",
-      headers: { authorization: "Bearer not-an-owner-token" },
-    });
-
-    expect(missing.statusCode).toBe(401);
-    expect(invalid.statusCode).toBe(401);
-  });
-
-  it("returns owner summary totals for paid sales", async () => {
-    const completedAt = new Date("2026-05-14T15:00:00.000Z");
-    const { db } = createSessionStateDb({
-      sales: [
-        {
-          id: "sale-1",
-          status: "paid",
-          completedAt,
-          items: [
-            {
-              id: "item-1",
-              workerId: "worker-1",
-              priceCents: 5000,
-              discountCents: 500,
-              finalServiceCents: 4500,
-              workerCommissionCents: 2700,
-              tipCents: 1000,
-              workerTotalCents: 3700,
-              businessCents: 1800,
-              status: "active",
-            },
-          ],
-          payments: [{ id: "payment-1", method: "cash", amountCents: 5500, status: "approved" }],
-          refunds: [],
-        },
-      ],
-    });
-    const app = await buildServer({ db, logger: false });
-    const token = issueOwnerToken("owner-1").token;
-
-    const response = await app.inject({
-      method: "GET",
-      url: "/api/reports/summary?start=2026-05-14T00:00:00.000Z&end=2026-05-15T00:00:00.000Z",
-      headers: { authorization: `Bearer ${token}` },
-    });
-
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({
-      summary: {
-        grossServiceCents: 5000,
-        discountCents: 500,
-        netServiceCents: 4500,
-        tipsCents: 1000,
-        workerCommissionCents: 2700,
-        totalCollectedCents: 5500,
-        paymentBreakdown: { cashCents: 5500, cardCents: 0, giftCardCents: 0, otherCents: 0 },
-      },
-    });
-  });
-
-  it("excludes declined payments from owner payment reports", async () => {
-    const { db, state } = createCheckoutFakeDb();
-    state.sale.payments.push(
-      { method: "cash", amountCents: 4000, status: "approved" },
-      { method: "card", amountCents: 6000, status: "declined" }
-    );
-    const app = await buildServer({ db, logger: false });
-    const token = issueOwnerToken("owner-1").token;
-
-    const response = await app.inject({
-      method: "GET",
-      url: "/api/reports/payments?start=2026-05-14T00:00:00.000Z&end=2026-05-15T00:00:00.000Z",
-      headers: { authorization: `Bearer ${token}` },
-    });
-
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({
-      totals: { cashCents: 4000, cardCents: 0, giftCardCents: 0, otherCents: 0 },
-    });
-    expect(response.json().payments).toHaveLength(1);
-  });
-
-  it("opens a session and rejects opening a second one with OPEN_SESSION_EXISTS", async () => {
-    const { db } = createSessionStateDb();
-    const app = await buildServer({ db, logger: false });
-
-    const first = await app.inject({ method: "POST", url: "/api/sessions/open", payload: {} });
-    expect(first.statusCode).toBe(201);
-    expect(first.json()).toMatchObject({ session: { status: "open" }, checkedInWorkerIds: [], openMode: "new" });
-
-    const second = await app.inject({ method: "POST", url: "/api/sessions/open", payload: {} });
-    expect(second.statusCode).toBe(409);
-    expect(second.json()).toMatchObject({ errorCode: "OPEN_SESSION_EXISTS" });
-  });
-
-  it("requires continue/new decision when same-day closed session exists", async () => {
-    const businessDate = new Date();
-    businessDate.setHours(0, 0, 0, 0);
-    const { db } = createSessionStateDb({
-      sessions: [
-        {
-          id: "session-closed-1",
-          status: "closed",
-          businessDate: businessDate.toISOString(),
-          openedAt: new Date(businessDate.getTime() + 9 * 60 * 60 * 1000).toISOString(),
-          closedAt: new Date(businessDate.getTime() + 12 * 60 * 60 * 1000).toISOString(),
-        },
-      ],
-      workerSessionCheckins: [{ id: "wsc-1", sessionId: "session-closed-1", workerId: "worker-1" }],
-    });
-    const app = await buildServer({ db, logger: false });
-
-    const response = await app.inject({ method: "POST", url: "/api/sessions/open", payload: {} });
-    expect(response.statusCode).toBe(409);
-    expect(response.json()).toMatchObject({
-      errorCode: "CONTINUE_DECISION_REQUIRED",
-      candidateSession: { id: "session-closed-1", checkedInWorkerCount: 1 },
-    });
-  });
-
-  it("continues the same-day closed session when mode=continue and source matches", async () => {
-    const businessDate = new Date();
-    businessDate.setHours(0, 0, 0, 0);
-    const { db } = createSessionStateDb({
-      sessions: [
-        {
-          id: "session-closed-1",
-          status: "closed",
-          businessDate: businessDate.toISOString(),
-          openedAt: new Date(businessDate.getTime() + 9 * 60 * 60 * 1000).toISOString(),
-          closedAt: new Date(businessDate.getTime() + 12 * 60 * 60 * 1000).toISOString(),
-          closedByUserId: "owner-1",
-        },
-      ],
-      workerSessionCheckins: [{ id: "wsc-1", sessionId: "session-closed-1", workerId: "worker-1" }],
-    });
-    const app = await buildServer({ db, logger: false });
-
-    const response = await app.inject({
-      method: "POST",
-      url: "/api/sessions/open",
-      payload: { mode: "continue", sourceSessionId: "session-closed-1" },
-    });
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({
-      session: { id: "session-closed-1", status: "open", closedAt: null },
-      checkedInWorkerIds: ["worker-1"],
-      openMode: "continue",
-      reopenedFromClosed: true,
-    });
-  });
-
-  it("starts a new same-day session when mode=new", async () => {
-    const businessDate = new Date();
-    businessDate.setHours(0, 0, 0, 0);
-    const { db } = createSessionStateDb({
-      sessions: [
-        {
-          id: "session-closed-1",
-          status: "closed",
-          businessDate: businessDate.toISOString(),
-          openedAt: new Date(businessDate.getTime() + 9 * 60 * 60 * 1000).toISOString(),
-          closedAt: new Date(businessDate.getTime() + 12 * 60 * 60 * 1000).toISOString(),
-        },
-      ],
-    });
-    const app = await buildServer({ db, logger: false });
-
-    const response = await app.inject({
-      method: "POST",
-      url: "/api/sessions/open",
-      payload: { mode: "new" },
-    });
-    expect(response.statusCode).toBe(201);
-    expect(response.json()).toMatchObject({
-      session: { status: "open" },
-      checkedInWorkerIds: [],
-      openMode: "new",
-      reopenedFromClosed: false,
-    });
-    expect((response.json() as { session: { id: string } }).session.id).not.toBe("session-closed-1");
-  });
-
-  it("returns CANDIDATE_STALE when continue source does not match latest same-day closed session", async () => {
-    const businessDate = new Date();
-    businessDate.setHours(0, 0, 0, 0);
-    const { db } = createSessionStateDb({
-      sessions: [
-        {
-          id: "session-closed-2",
-          status: "closed",
-          businessDate: businessDate.toISOString(),
-          openedAt: new Date(businessDate.getTime() + 13 * 60 * 60 * 1000).toISOString(),
-          closedAt: new Date(businessDate.getTime() + 15 * 60 * 60 * 1000).toISOString(),
-        },
-      ],
-    });
-    const app = await buildServer({ db, logger: false });
-
-    const response = await app.inject({
-      method: "POST",
-      url: "/api/sessions/open",
-      payload: { mode: "continue", sourceSessionId: "session-closed-1" },
-    });
-    expect(response.statusCode).toBe(409);
-    expect(response.json()).toMatchObject({
-      errorCode: "CANDIDATE_STALE",
-      candidateSession: { id: "session-closed-2" },
-    });
-  });
-
-  it("requires open session for customer check-in and allows multiple requested-worker customer check-ins", async () => {
-    const { db } = createSessionStateDb();
-    const app = await buildServer({ db, logger: false });
-
-    const noSession = await app.inject({
-      method: "POST",
-      url: "/api/checkins",
-      payload: { requestedWorkerId: "worker-1", customer: { name: "Mary", phone: "5551234567" } },
-    });
-    expect(noSession.statusCode).toBe(409);
-
-    await app.inject({ method: "POST", url: "/api/sessions/open", payload: {} });
-
-    const firstCheckin = await app.inject({
-      method: "POST",
-      url: "/api/checkins",
-      payload: { requestedWorkerId: "worker-1", customer: { name: "Mary", phone: "5551234567" } },
-    });
-    expect(firstCheckin.statusCode).toBe(201);
-
-    const second = await app.inject({
-      method: "POST",
-      url: "/api/checkins",
-      payload: { requestedWorkerId: "worker-1", customer: { name: "Jane", phone: "5559876543" } },
-    });
-    expect(second.statusCode).toBe(201);
-  });
-
-  it("renews worker shift-check-in eligibility after starting a new same-day session", async () => {
-    const businessDate = new Date();
-    businessDate.setHours(0, 0, 0, 0);
-    const { db } = createSessionStateDb({
-      sessions: [
-        {
-          id: "session-closed-1",
-          status: "closed",
-          businessDate: businessDate.toISOString(),
-          openedAt: new Date(businessDate.getTime() + 9 * 60 * 60 * 1000).toISOString(),
-          closedAt: new Date(businessDate.getTime() + 12 * 60 * 60 * 1000).toISOString(),
-        },
-      ],
-      workerSessionCheckins: [{ id: "old-wsc-1", sessionId: "session-closed-1", workerId: "worker-1" }],
-    });
-    const app = await buildServer({ db, logger: false });
-
-    const openNew = await app.inject({
-      method: "POST",
-      url: "/api/sessions/open",
-      payload: { mode: "new" },
-    });
-    expect(openNew.statusCode).toBe(201);
-
-    const checkin = await app.inject({
-      method: "POST",
-      url: "/api/sessions/" + (openNew.json() as { session: { id: string } }).session.id + "/workers/checkin",
-      payload: { workerId: "worker-1" },
-    });
-    expect(checkin.statusCode).toBe(201);
-  });
-
-  it("keeps worker shift-check-in exclusion when continuing the same closed session", async () => {
-    const businessDate = new Date();
-    businessDate.setHours(0, 0, 0, 0);
-    const { db } = createSessionStateDb({
-      sessions: [
-        {
-          id: "session-closed-1",
-          status: "closed",
-          businessDate: businessDate.toISOString(),
-          openedAt: new Date(businessDate.getTime() + 9 * 60 * 60 * 1000).toISOString(),
-          closedAt: new Date(businessDate.getTime() + 12 * 60 * 60 * 1000).toISOString(),
-        },
-      ],
-      workerSessionCheckins: [{ id: "old-wsc-1", sessionId: "session-closed-1", workerId: "worker-1" }],
-    });
-    const app = await buildServer({ db, logger: false });
-
-    const openContinue = await app.inject({
-      method: "POST",
-      url: "/api/sessions/open",
-      payload: { mode: "continue", sourceSessionId: "session-closed-1" },
-    });
-    expect(openContinue.statusCode).toBe(200);
-
-    const duplicate = await app.inject({
-      method: "POST",
-      url: "/api/sessions/session-closed-1/workers/checkin",
-      payload: { workerId: "worker-1" },
-    });
-    expect(duplicate.statusCode).toBe(409);
-    expect(duplicate.body).toContain("already checked in");
-  });
-
-  it("returns current session checked-in workers", async () => {
-    const { db } = createSessionStateDb({
-      sessions: [{ id: "session-1", status: "open", businessDate: "2026-05-14T00:00:00.000Z", openedAt: "2026-05-14T09:00:00.000Z" }],
-      workerSessionCheckins: [
-        { id: "wsc-1", sessionId: "session-1", workerId: "worker-1", checkedInAt: "2026-05-14T09:10:00.000Z" },
-        { id: "wsc-2", sessionId: "session-1", workerId: "worker-2", checkedInAt: "2026-05-14T09:05:00.000Z" },
-        { id: "wsc-3", sessionId: "session-1", workerId: "worker-1", checkedInAt: "2026-05-14T09:15:00.000Z" },
-      ],
-    });
-    const app = await buildServer({ db, logger: false });
-
-    const response = await app.inject({ method: "GET", url: "/api/sessions/current" });
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({
-      session: { id: "session-1", status: "open" },
-      checkedInWorkerIds: ["worker-2", "worker-1"],
-      checkedInWorkers: [
-        { workerId: "worker-2", checkedInAt: "2026-05-14T09:05:00.000Z" },
-        { workerId: "worker-1", checkedInAt: "2026-05-14T09:10:00.000Z" },
-      ],
-    });
-  });
-
-  it("blocks closing a session with unresolved check-ins and sales", async () => {
-    const { db } = createSessionStateDb({
-      sessions: [{ id: "session-1", status: "open", businessDate: "2026-05-14T00:00:00.000Z", openedAt: "2026-05-14T09:00:00.000Z" }],
-      checkins: [{ id: "checkin-1", sessionId: "session-1", requestedWorkerId: "worker-1", status: "waiting" }],
-      sales: [{ id: "sale-1", checkinId: "checkin-1", status: "open" }],
-    });
-    const app = await buildServer({ db, logger: false });
-
-    const response = await app.inject({ method: "POST", url: "/api/sessions/session-1/close", payload: {} });
-    expect(response.statusCode).toBe(409);
-    expect(response.json()).toMatchObject({
-      blockers: { unresolvedCheckinsCount: 1, unresolvedSalesCount: 1 },
-    });
-  });
-
-  it("closes a clean session and returns a report", async () => {
-    const { db } = createSessionStateDb({
-      sessions: [{ id: "session-1", status: "open", businessDate: "2026-05-14T00:00:00.000Z", openedAt: "2026-05-14T09:00:00.000Z" }],
-      checkins: [{ id: "checkin-1", sessionId: "session-1", requestedWorkerId: "worker-1", status: "paid" }],
-      turns: [{ id: "turn-1", checkinId: "checkin-1", status: "completed" }],
-      sales: [
-        {
-          id: "sale-1",
-          checkinId: "checkin-1",
-          status: "paid",
-          items: [{ finalServiceCents: 6500, tipCents: 1000, workerCommissionCents: 3900 }],
-          payments: [{ amountCents: 7500 }],
-        },
-      ],
-    });
-    const app = await buildServer({ db, logger: false });
-
-    const close = await app.inject({ method: "POST", url: "/api/sessions/session-1/close", payload: {} });
-    expect(close.statusCode).toBe(200);
-    expect(close.json()).toMatchObject({ session: { id: "session-1", status: "closed" } });
-
-    const report = await app.inject({ method: "GET", url: "/api/sessions/session-1/report" });
-    expect(report.statusCode).toBe(200);
-    expect(report.json()).toMatchObject({
-      summary: {
-        checkinsCount: 1,
-        resolvedCheckinsCount: 1,
-        turnsCount: 1,
-        completedTurnsCount: 1,
-        salesCount: 1,
-        paidSalesCount: 1,
-        serviceCents: 6500,
-        tipCents: 1000,
-        commissionCents: 3900,
-        collectedCents: 7500,
-      },
-    });
-  });
-
-  it("includes no-checkin sales linked by sale.sessionId in close blockers and report", async () => {
-    const { db } = createSessionStateDb({
-      sessions: [{ id: "session-1", status: "open", businessDate: "2026-05-14T00:00:00.000Z", openedAt: "2026-05-14T09:00:00.000Z" }],
-      sales: [
-        {
-          id: "sale-1",
-          sessionId: "session-1",
-          status: "open",
-          items: [{ finalServiceCents: 5000, tipCents: 700, workerCommissionCents: 3000 }],
-          payments: [{ amountCents: 5700 }],
-        },
-      ],
-      turns: [{ id: "turn-1", sessionId: "session-1", status: "completed" }],
-    });
-    const app = await buildServer({ db, logger: false });
-
-    const blockedClose = await app.inject({ method: "POST", url: "/api/sessions/session-1/close", payload: {} });
-    expect(blockedClose.statusCode).toBe(409);
-    expect(blockedClose.json()).toMatchObject({
-      blockers: { unresolvedSalesCount: 1 },
-    });
-
-    db.sale.findMany = async (args?: unknown) => {
-      const where = ((args as { where?: Record<string, unknown> } | undefined)?.where ?? {}) as Record<string, unknown>;
-      const statusFilter = where.status as { in?: string[] } | undefined;
-      const isBlockedQuery = Boolean(statusFilter?.in);
-      if (isBlockedQuery) {
-        return [];
-      }
-      return [
-        {
-          id: "sale-1",
-          sessionId: "session-1",
-          status: "paid",
-          items: [{ finalServiceCents: 5000, tipCents: 700, workerCommissionCents: 3000 }],
-          payments: [{ amountCents: 5700 }],
-        },
-      ];
-    };
-
-    const close = await app.inject({ method: "POST", url: "/api/sessions/session-1/close", payload: {} });
-    expect(close.statusCode).toBe(200);
-
-    const report = await app.inject({ method: "GET", url: "/api/sessions/session-1/report" });
-    expect(report.statusCode).toBe(200);
-    expect(report.json()).toMatchObject({
-      summary: {
-        turnsCount: 1,
-        salesCount: 1,
-        serviceCents: 5000,
-        tipCents: 700,
-        commissionCents: 3000,
-      },
-    });
-  });
-
-  it("returns worker-scoped appointments with token auth", async () => {
-    const salt = "testsalt1234567890";
-    const key = scryptSync("1234", salt, 64).toString("hex");
-    const workerRecord = {
-      id: "worker-1",
-      displayName: "Amy",
-      active: true,
-      currentStatus: "available",
-      user: { passwordHash: `${salt}:${key}` },
-      turns: [],
-      saleItems: [],
-    };
-    const { db, calls } = createFakeDbWithWorkers([workerRecord]);
-    const app = await buildServer({ db, logger: false });
-    const login = await app.inject({
-      method: "POST",
-      url: "/api/workers/login",
-      payload: { workerId: "worker-1", password: "1234" },
-    });
-    const token = (login.json() as { token: string }).token;
-    const response = await app.inject({
-      method: "GET",
-      url: "/api/worker/me/appointments",
-      headers: { authorization: `Bearer ${token}` },
-    });
-
-    expect(response.statusCode).toBe(200);
-    expect(calls).toContainEqual({
-      model: "appointment",
-      method: "findMany",
-      args: expect.objectContaining({
-        where: expect.objectContaining({ workerId: "worker-1" }),
-      }),
-    });
-  });
-
-  it("returns worker earnings totals for authenticated worker", async () => {
-    const salt = "testsalt1234567890";
-    const key = scryptSync("1234", salt, 64).toString("hex");
-    const workerRecord = {
-      id: "worker-1",
-      displayName: "Amy",
-      active: true,
-      currentStatus: "available",
-      user: { passwordHash: `${salt}:${key}` },
-      turns: [],
-      saleItems: [
-        { id: "si-1", finalServiceCents: 7000, workerCommissionCents: 4200, tipCents: 1000, workerTotalCents: 5200, createdAt: "2026-05-14T10:00:00.000Z" },
-        { id: "si-2", finalServiceCents: 5000, workerCommissionCents: 3000, tipCents: 900, workerTotalCents: 3900, createdAt: "2026-05-14T11:00:00.000Z" },
-      ],
-    };
-    const { db } = createFakeDbWithWorkers([workerRecord]);
-    const app = await buildServer({ db, logger: false });
-    const login = await app.inject({
-      method: "POST",
-      url: "/api/workers/login",
-      payload: { workerId: "worker-1", password: "1234" },
-    });
-    const token = (login.json() as { token: string }).token;
-    const response = await app.inject({
-      method: "GET",
-      url: "/api/worker/me/earnings",
-      headers: { authorization: `Bearer ${token}` },
-    });
-
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({
-      totals: {
-        serviceCents: 12000,
-        tipsCents: 1900,
-        commissionCents: 7200,
-        estimatedPayCents: 9100,
-      },
-    });
-  });
-
-  it("returns a private worker dashboard summary", async () => {
-    const workerRecord = {
-      id: "worker-1",
-      displayName: "Amy",
-      currentStatus: "in_service",
-      active: true,
-      turns: [
-        {
-          id: "turn-1",
-          status: "in_service",
-          startedAt: "2026-05-13T15:00:00.000Z",
-          checkin: { notes: "Gel", customer: { id: "c-1", name: "Luna" } },
-        },
-        {
-          id: "turn-2",
-          status: "completed",
-          startedAt: "2026-05-13T13:00:00.000Z",
-          endedAt: "2026-05-13T14:00:00.000Z",
-        },
-      ],
-      saleItems: [
-        { finalServiceCents: 7000, tipCents: 1000, workerCommissionCents: 4200, workerTotalCents: 5200 },
-        { finalServiceCents: 5000, tipCents: 800, workerCommissionCents: 3000, workerTotalCents: 4100 },
-      ],
-    };
-    const { db } = createFakeDbWithWorkers([workerRecord]);
-    const app = await buildServer({ db, logger: false });
-
-    const response = await app.inject({
-      method: "GET",
-      url: "/api/workers/worker-1/dashboard",
-    });
-
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({
-      range: { start: expect.any(String), end: expect.any(String) },
-      worker: { id: "worker-1", displayName: "Amy", status: "in_service" },
-      activeTurn: { id: "turn-1", status: "in_service" },
-      turnsTodayCount: 2,
-      salesTodayCents: 12000,
-      tipsTodayCents: 1800,
-      salesRangeCents: 12000,
-      tipsRangeCents: 1800,
-      commissionRangeCents: 7200,
-      estimatedPayTodayCents: 9300,
-      recentTurns: [{ id: "turn-1" }, { id: "turn-2" }],
-    });
-  });
-
-  it("returns range-scoped dashboard data with per-turn commission", async () => {
-    const salt = "testsalt1234567890";
-    const key = scryptSync("1234", salt, 64).toString("hex");
-    const workerRecord = {
-      id: "worker-1",
-      displayName: "Amy",
-      currentStatus: "available",
-      active: true,
-      user: { passwordHash: `${salt}:${key}` },
-      turns: [
-        {
-          id: "turn-1",
-          status: "completed",
-          startedAt: "2026-05-14T10:00:00.000Z",
-          endedAt: "2026-05-14T11:00:00.000Z",
-          sale: {
-            id: "sale-1",
-            items: [
-              { workerId: "worker-1", serviceNameSnapshot: "Deluxe Pedicure", finalServiceCents: 6500, tipCents: 1200, workerCommissionCents: 3900 },
-              { workerId: "worker-2", serviceNameSnapshot: "Basic Manicure", finalServiceCents: 3000, tipCents: 600, workerCommissionCents: 1800 },
-            ],
-          },
-        },
-      ],
-      saleItems: [{ finalServiceCents: 6500, tipCents: 1200, workerCommissionCents: 3900, workerTotalCents: 5100 }],
-    };
-    const { db, calls } = createFakeDbWithWorkers([workerRecord]);
-    const app = await buildServer({ db, logger: false });
-    const login = await app.inject({
-      method: "POST",
-      url: "/api/workers/login",
-      payload: { workerId: "worker-1", password: "1234" },
-    });
-    const token = (login.json() as { token: string }).token;
-
-    const response = await app.inject({
-      method: "GET",
-      url: "/api/worker/me/dashboard?start=2026-05-14T00:00:00.000Z&end=2026-05-15T00:00:00.000Z",
-      headers: { authorization: `Bearer ${token}` },
-    });
-
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({
-      range: {
-        start: "2026-05-14T00:00:00.000Z",
-        end: "2026-05-15T00:00:00.000Z",
-      },
-      salesRangeCents: 6500,
-      tipsRangeCents: 1200,
-      commissionRangeCents: 3900,
-      recentTurns: [
-        {
-          id: "turn-1",
-          serviceTotalCents: 6500,
-          tipTotalCents: 1200,
-          commissionCents: 3900,
-          turnTotalCents: 7700,
-        },
-      ],
-    });
-
-    expect(calls).toContainEqual({
-      model: "worker",
-      method: "findUnique",
-      args: expect.objectContaining({
-        include: expect.objectContaining({
-          turns: expect.objectContaining({
-            where: { createdAt: { gte: new Date("2026-05-14T00:00:00.000Z"), lt: new Date("2026-05-15T00:00:00.000Z") } },
-          }),
-          saleItems: expect.objectContaining({
-            where: { createdAt: { gte: new Date("2026-05-14T00:00:00.000Z"), lt: new Date("2026-05-15T00:00:00.000Z") }, status: "active" },
-          }),
-        }),
-      }),
-    });
   });
 
   it("rejects creating a worker without a PIN", async () => {
@@ -2103,9 +986,8 @@ describe("local API CRUD routes", () => {
   });
 
   it("creates a check-in with an embedded new customer", async () => {
-    const { db, calls } = createSessionStateDb();
+    const { db, calls } = createFakeDb();
     const app = await buildServer({ db, logger: false });
-    await app.inject({ method: "POST", url: "/api/sessions/open", payload: {} });
 
     const response = await app.inject({
       method: "POST",
@@ -2117,8 +999,8 @@ describe("local API CRUD routes", () => {
     });
 
     expect(response.statusCode).toBe(201);
-    expect(calls).toContainEqual(expect.objectContaining({ model: "customer", method: "create" }));
-    expect(calls).toContainEqual(expect.objectContaining({ model: "checkin", method: "create" }));
+    expect(calls[0]).toMatchObject({ model: "customer", method: "create" });
+    expect(calls[1]).toMatchObject({ model: "checkin", method: "create" });
   });
 
   it("rejects invalid appointment time ranges", async () => {
@@ -2160,7 +1042,6 @@ describe("local API CRUD routes", () => {
       args: {
         data: {
           checkinId: "checkin-1",
-          sessionId: undefined,
           workerId: "worker-1",
           sessionId: "found",
           turnCount: 1,
@@ -2179,7 +1060,7 @@ describe("local API CRUD routes", () => {
     });
   });
 
-  it("starts service by updating the turn and check-in only", async () => {
+  it("starts service by updating the turn, worker, and check-in", async () => {
     const { db, calls } = createFakeDb();
     const app = await buildServer({ db, logger: false });
 
@@ -2203,14 +1084,18 @@ describe("local API CRUD routes", () => {
       },
     });
     expect(calls).toContainEqual({
+      model: "worker",
+      method: "update",
+      args: { where: { id: "worker-1" }, data: { currentStatus: "in_service" } },
+    });
+    expect(calls).toContainEqual({
       model: "checkin",
       method: "update",
       args: { where: { id: "checkin-1" }, data: { status: "in_service" } },
     });
-    expect(calls.some((call) => call.model === "worker" && call.method === "update")).toBe(false);
   });
 
-  it("completes service and moves the check-in to ready for checkout without mutating worker status", async () => {
+  it("completes service and moves the check-in to ready for checkout", async () => {
     const { db, calls } = createFakeDb();
     const app = await buildServer({ db, logger: false });
 
@@ -2238,11 +1123,15 @@ describe("local API CRUD routes", () => {
       },
     });
     expect(calls).toContainEqual({
+      model: "worker",
+      method: "update",
+      args: { where: { id: "worker-1" }, data: { currentStatus: "available" } },
+    });
+    expect(calls).toContainEqual({
       model: "checkin",
       method: "update",
       args: { where: { id: "checkin-1" }, data: { status: "ready_for_checkout" } },
     });
-    expect(calls.some((call) => call.model === "worker" && call.method === "update")).toBe(false);
   });
 
   it("skips a turn without creating a started timestamp", async () => {
@@ -2275,88 +1164,10 @@ describe("local API CRUD routes", () => {
   });
 
   it("returns a turn dashboard with suggestion ranks", async () => {
-    const { db } = createFakeDbWithWorkers(
-      [
-        {
-          id: "worker-1",
-          displayName: "Amy",
-          currentStatus: "available",
-          turns: [{ id: "turn-1", status: "completed", startedAt: "2026-05-12T14:00:00.000Z", endedAt: "2026-05-12T15:00:00.000Z" }],
-          saleItems: [{ finalServiceCents: 5000, tipCents: 1000 }],
-        },
-        {
-          id: "worker-2",
-          displayName: "Bella",
-          currentStatus: "available",
-          turns: [],
-          saleItems: [],
-        },
-        {
-          id: "worker-3",
-          displayName: "Cindy",
-          currentStatus: "in_service",
-          turns: [
-            {
-              id: "turn-3",
-              workerId: "worker-3",
-              checkinId: "checkin-3",
-              status: "in_service",
-              startedAt: "2026-05-12T15:30:00.000Z",
-              checkin: { notes: "Gel manicure", customer: { id: "customer-3", name: "Grace" } },
-            },
-          ],
-          saleItems: [],
-        },
-      ],
-      [{ id: "session-1", businessDate: "2026-05-14T00:00:00.000Z", status: "open", openedAt: "2026-05-14T08:00:00.000Z" }]
-    );
-    const app = await buildServer({ db, logger: false });
-
-    const response = await app.inject({ method: "GET", url: "/api/turns/dashboard" });
-
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({
-      scope: "session",
-      session: { id: "session-1", status: "open" },
-      workers: [
-        {
-          workerId: "worker-1",
-          turnsTakenSession: 1,
-          turnsTakenToday: 1,
-          salesSessionCents: 5000,
-          tipsSessionCents: 1000,
-          salesTodayCents: 5000,
-          tipsTodayCents: 1000,
-          suggestionRank: 2,
-        },
-        {
-          workerId: "worker-2",
-          turnsTakenSession: 0,
-          turnsTakenToday: 0,
-          suggestionRank: 1,
-        },
-        {
-          workerId: "worker-3",
-          turnsTakenSession: 1,
-          turnsTakenToday: 1,
-          activeTurn: {
-            id: "turn-3",
-            checkinId: "checkin-3",
-            workerId: "worker-3",
-            customer: { id: "customer-3", name: "Grace" },
-          },
-          suggestionRank: null,
-        },
-      ],
-    });
-  });
-
-  it("returns zeroed session metrics when no session is open", async () => {
     const { db } = createFakeDbWithWorkers([
       {
         id: "worker-1",
         displayName: "Amy",
-<<<<<<< HEAD
         currentStatus: "available",
         workerSessions: [{ checkedOutAt: null }],
         turns: [{ id: "turn-1", status: "completed", startedAt: "2026-05-12T14:00:00.000Z", endedAt: "2026-05-12T15:00:00.000Z" }],
@@ -2378,12 +1189,6 @@ describe("local API CRUD routes", () => {
         turns: [{ id: "turn-3", status: "in_service", startedAt: "2026-05-12T15:30:00.000Z" }],
         saleItems: [],
       },
-=======
-        currentStatus: "in_service",
-        turns: [{ id: "turn-1", status: "completed", startedAt: "2026-05-12T14:00:00.000Z", endedAt: "2026-05-12T15:00:00.000Z" }],
-        saleItems: [{ finalServiceCents: 5000, tipCents: 1000 }],
-      },
->>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
     ]);
     const app = await buildServer({ db, logger: false });
 
@@ -2391,15 +1196,23 @@ describe("local API CRUD routes", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
-      scope: "session",
-      session: null,
       workers: [
         {
           workerId: "worker-1",
-          status: "in_service",
-          turnsTakenSession: 0,
-          salesSessionCents: 0,
-          tipsSessionCents: 0,
+          turnsTakenToday: 1,
+          salesTodayCents: 5000,
+          tipsTodayCents: 1000,
+          suggestionRank: 2,
+        },
+        {
+          workerId: "worker-2",
+          turnsTakenToday: 0,
+          suggestionRank: 1,
+        },
+        {
+          workerId: "worker-3",
+          turnsTakenToday: 1,
+          suggestionRank: null,
         },
       ],
     });
@@ -2744,7 +1557,6 @@ describe("local API CRUD routes", () => {
       method: "create",
       args: {
         data: {
-          sessionId: undefined,
           customerId: "customer-1",
           appointmentId: undefined,
           checkinId: "checkin-1",
@@ -2761,38 +1573,6 @@ describe("local API CRUD routes", () => {
     });
   });
 
-  it("stamps current open session on empty sale creation", async () => {
-    const { db, calls } = createCheckoutFakeDb({
-      sessions: [{ id: "session-1", status: "open", openedAt: "2026-05-14T08:00:00.000Z" }],
-    });
-    const app = await buildServer({ db, logger: false });
-
-    const response = await app.inject({
-      method: "POST",
-      url: "/api/sales",
-      payload: {},
-    });
-
-    expect(response.statusCode).toBe(201);
-    expect(calls).toContainEqual({
-      model: "sale",
-      method: "create",
-      args: expect.objectContaining({
-        data: expect.objectContaining({ sessionId: "session-1", checkinId: undefined }),
-      }),
-    });
-  });
-
-  it("returns sale detail for checkout state", async () => {
-    const { db } = createCheckoutFakeDb();
-    const app = await buildServer({ db, logger: false });
-
-    const response = await app.inject({ method: "GET", url: "/api/sales/sale-1" });
-
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({ id: "sale-1", checkinId: "checkin-1", status: "open" });
-  });
-
   it("adds a service item with service and worker snapshots", async () => {
     const { db, calls } = createCheckoutFakeDb();
     const app = await buildServer({ db, logger: false });
@@ -2800,7 +1580,7 @@ describe("local API CRUD routes", () => {
     const response = await app.inject({
       method: "POST",
       url: "/api/sales/sale-1/items",
-      payload: { serviceId: "service-1", workerId: "worker-1", discountCents: 2000, tipCents: 1000 },
+      payload: { serviceId: "service-1", workerId: "worker-1", discountCents: 2000 },
     });
 
     expect(response.statusCode).toBe(201);
@@ -2819,8 +1599,8 @@ describe("local API CRUD routes", () => {
           finalServiceCents: 10000,
           commissionRateSnapshot: 0.6,
           workerCommissionCents: 6000,
-          tipCents: 1000,
-          workerTotalCents: 7000,
+          tipCents: 0,
+          workerTotalCents: 6000,
           businessCents: 4000,
         },
       },
@@ -2877,7 +1657,7 @@ describe("local API CRUD routes", () => {
 
     expect(complete.statusCode).toBe(200);
     expect(state.sale.status).toBe("paid");
-    expect(state.sale.amountPaidCents).toBe(13080);
+    expect(state.sale.amountPaidCents).toBe(12000);
   });
 
   it("keeps sale unpaid when mock card declines", async () => {
@@ -2896,7 +1676,6 @@ describe("local API CRUD routes", () => {
     expect(state.sale.amountPaidCents).toBe(0);
   });
 
-<<<<<<< HEAD
   it("recovers pending card payment by Clover externalPaymentId", async () => {
     const { db, state } = createCheckoutFakeDb();
     state.sale.items.push({ id: "item-1", priceCents: 12000, discountCents: 0, tipCents: 0, status: "active" });
@@ -2945,26 +1724,6 @@ describe("local API CRUD routes", () => {
       providerPaymentId: "mock-provider-payment",
       amountCents: 12000,
     });
-=======
-  it("records a refund against a paid sale and marks fully refunded sales", async () => {
-    const { db, state } = createCheckoutFakeDb();
-    state.sale.status = "paid";
-    state.sale.totalCents = 12000;
-    state.sale.amountPaidCents = 12000;
-    state.sale.payments.push({ id: "payment-1", method: "cash", amountCents: 12000, status: "approved" });
-    const app = await buildServer({ db, logger: false });
-
-    const response = await app.inject({
-      method: "POST",
-      url: "/api/sales/sale-1/refunds",
-      payload: { paymentId: "payment-1", amountCents: 12000, reason: "Customer refund" },
-    });
-
-    expect(response.statusCode).toBe(201);
-    expect(state.sale.refunds).toHaveLength(1);
-    expect(state.sale.refunds[0]).toMatchObject({ amountCents: 12000, reason: "Customer refund" });
-    expect(state.sale.status).toBe("refunded");
->>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
   });
 
   it("rejects underpaid sale completion", async () => {
@@ -2977,165 +1736,5 @@ describe("local API CRUD routes", () => {
 
     expect(response.statusCode).toBe(400);
     expect(response.json()).toMatchObject({ error: "sale is underpaid", balanceDueCents: 8000 });
-  });
-
-  it("increments one completed turn per worker involved in the sale", async () => {
-    const { db, calls, state } = createCheckoutFakeDb();
-    state.sale.items.push(
-      { id: "item-1", workerId: "worker-1", priceCents: 7000, discountCents: 0, tipCents: 0, status: "active" },
-      { id: "item-2", workerId: "worker-2", priceCents: 5000, discountCents: 0, tipCents: 0, status: "active" }
-    );
-    const app = await buildServer({ db, logger: false });
-
-    await app.inject({
-      method: "POST",
-      url: "/api/sales/sale-1/payments/cash",
-      payload: { amountCents: 12000 },
-    });
-    const complete = await app.inject({ method: "POST", url: "/api/sales/sale-1/complete" });
-
-    expect(complete.statusCode).toBe(200);
-    const turnCreates = calls.filter((call) => call.model === "turn" && call.method === "create");
-    expect(turnCreates).toHaveLength(2);
-    expect(turnCreates.map((call) => (call.args as { data: { workerId: string } }).data.workerId).sort()).toEqual([
-      "worker-1",
-      "worker-2",
-    ]);
-  });
-
-  it("carries sale session id to completed turns for no-checkin flow", async () => {
-    const { db, calls, state } = createCheckoutFakeDb();
-    state.sale.checkinId = null;
-    state.sale.sessionId = "session-1";
-    state.sale.items.push(
-      { id: "item-1", workerId: "worker-1", priceCents: 7000, discountCents: 0, tipCents: 0, status: "active" },
-      { id: "item-2", workerId: "worker-2", priceCents: 5000, discountCents: 0, tipCents: 0, status: "active" }
-    );
-    const app = await buildServer({ db, logger: false });
-
-    await app.inject({
-      method: "POST",
-      url: "/api/sales/sale-1/payments/cash",
-      payload: { amountCents: 12000 },
-    });
-    const complete = await app.inject({ method: "POST", url: "/api/sales/sale-1/complete" });
-
-    expect(complete.statusCode).toBe(200);
-    const turnCreates = calls.filter((call) => call.model === "turn" && call.method === "create");
-    expect(turnCreates).toHaveLength(2);
-    expect(
-      turnCreates.every((call) => (call.args as { data: { sessionId?: string } }).data.sessionId === "session-1")
-    ).toBe(true);
-  });
-
-  it("prints and stores a receipt for a paid sale", async () => {
-    const { db, state } = createCheckoutFakeDb();
-    const printer = new MockReceiptPrinterAdapter();
-    state.sale.status = "paid";
-    state.sale.totalCents = 5500;
-    state.sale.amountPaidCents = 5500;
-    state.sale.items.push({ id: "item-1", workerId: "worker-1", priceCents: 5000, discountCents: 0, tipCents: 500, status: "active" });
-    state.sale.payments.push({ id: "payment-1", method: "cash", amountCents: 5500, tipCents: 0, status: "approved" });
-    const app = await buildServer({ db, logger: false, printer });
-
-    const response = await app.inject({ method: "POST", url: "/api/sales/sale-1/receipts/print" });
-
-    expect(response.statusCode).toBe(201);
-    expect(printer.printedReceipts).toHaveLength(1);
-    expect(printer.printedReceipts[0]).toMatchObject({
-      salonName: "Nail Salon",
-      receiptNumber: expect.stringMatching(/^R-/),
-      totalCents: 5500,
-      paymentSummary: "cash $55.00",
-    });
-    expect(state.sale.receipts).toHaveLength(1);
-    expect(state.sale.receipts[0]).toMatchObject({ saleId: "sale-1", printStatus: "printed" });
-  });
-
-  it("rejects receipt printing for an unpaid sale", async () => {
-    const { db } = createCheckoutFakeDb();
-    const app = await buildServer({ db, logger: false });
-
-    const response = await app.inject({ method: "POST", url: "/api/sales/sale-1/receipts/print" });
-
-    expect(response.statusCode).toBe(409);
-    expect(response.json()).toEqual({ error: "receipt can only be printed for a paid sale" });
-  });
-
-  it("reprints an existing receipt snapshot", async () => {
-    const { db, state } = createCheckoutFakeDb();
-    const printer = new MockReceiptPrinterAdapter();
-    state.sale.receipts.push({
-      id: "receipt-1",
-      saleId: "sale-1",
-      printStatus: "printed",
-      receiptDataJson: {
-        salonName: "Nail Salon",
-        receiptNumber: "R-TEST",
-        issuedAt: "2026-05-14T15:00:00.000Z",
-        customerName: "Mary",
-        items: [{ serviceName: "Classic Pedicure", workerName: "Amy", amountCents: 5000, tipCents: 1000 }],
-        subtotalCents: 5000,
-        discountCents: 0,
-        tipCents: 1000,
-        totalCents: 6000,
-        paymentSummary: "cash $60.00",
-        payments: [{ method: "cash", amountCents: 6000, tipCents: 0, reference: null }],
-      },
-    });
-    const app = await buildServer({ db, logger: false, printer });
-
-    const response = await app.inject({ method: "POST", url: "/api/sales/sale-1/receipts/receipt-1/reprint" });
-
-    expect(response.statusCode).toBe(200);
-    expect(printer.printedReceipts).toHaveLength(1);
-    expect(printer.printedReceipts[0]).toMatchObject({ receiptNumber: "R-TEST", totalCents: 6000 });
-  });
-
-  it("rejects tip distribution when there is no approved Clover tip", async () => {
-    const { db, state } = createCheckoutFakeDb();
-    state.sale.items.push({ id: "item-1", priceCents: 12000, discountCents: 0, tipCents: 0, status: "active" });
-    const app = await buildServer({ db, logger: false });
-
-    const response = await app.inject({
-      method: "POST",
-      url: "/api/sales/sale-1/tip-distribution",
-      payload: { items: [{ itemId: "item-1", tipCents: 1080 }] },
-    });
-
-    expect(response.statusCode).toBe(400);
-    expect(response.body).toContain("cannot set tip distribution without approved Clover tip");
-  });
-
-  it("accepts tip distribution only when submitted total matches Clover tip", async () => {
-    const { db, state } = createCheckoutFakeDb();
-    state.sale.items.push(
-      { id: "item-1", priceCents: 7000, discountCents: 0, tipCents: 0, status: "active" },
-      { id: "item-2", priceCents: 5000, discountCents: 0, tipCents: 0, status: "active" }
-    );
-    const app = await buildServer({ db, logger: false, terminal: new MockTerminalAdapter("approved") });
-
-    await app.inject({
-      method: "POST",
-      url: "/api/sales/sale-1/payments/card/start",
-      payload: { amountCents: 12000, idempotencyKey: "tip-dist-card" },
-    });
-
-    const bad = await app.inject({
-      method: "POST",
-      url: "/api/sales/sale-1/tip-distribution",
-      payload: { items: [{ itemId: "item-1", tipCents: 400 }, { itemId: "item-2", tipCents: 500 }] },
-    });
-    expect(bad.statusCode).toBe(400);
-    expect(bad.body).toContain("tip distribution must equal approved Clover tip total");
-
-    const ok = await app.inject({
-      method: "POST",
-      url: "/api/sales/sale-1/tip-distribution",
-      payload: { items: [{ itemId: "item-1", tipCents: 1260 }, { itemId: "item-2", tipCents: 900 }] },
-    });
-    expect(ok.statusCode).toBe(200);
-    expect(state.sale.totalCents).toBe(14160);
-    expect(state.sale.amountPaidCents).toBe(14160);
   });
 });

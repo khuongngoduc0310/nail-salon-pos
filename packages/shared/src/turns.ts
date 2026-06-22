@@ -51,25 +51,23 @@ export const ZERO_TURN_COUNT = 0;
 // ─── Turn counting helpers ──────────────────────────────────────────
 
 /**
- * A turn counts if it's in one of the active states (assigned, in_service, completed).
- * Skipped and cancelled turns are excluded.
- * This ensures newly assigned turns are immediately reflected on dashboards.
+ * A turn counts once service has started. Skipped turns count only when they
+ * had already started; assigned-only and cancelled turns do not consume a turn.
  */
 export function turnCountsAsTaken(turn: TurnForCounting): boolean {
-  const activeStatuses: TurnStatus[] = ["assigned", "in_service", "completed"];
-  return activeStatuses.includes(turn.status);
+  if (!turn.startedAt) return false;
+  return turn.status === "in_service" || turn.status === "completed" || turn.status === "skipped";
 }
 
 /**
- * Counts the raw number of active turns (each turn = 1, ignoring turnCount).
- * Includes assigned, in_service, and completed turns.
+ * Counts the raw number of started turns (each turn = 1, ignoring turnCount).
  */
 export function countTurnsTaken(turns: TurnForCounting[]): number {
   return turns.filter(turnCountsAsTaken).length;
 }
 
 /**
- * Sums the turnCount values across all active turns.
+ * Sums the turnCount values across all started turns.
  * Kept for backwards compatibility — may be used by reports etc.
  */
 export function sumTurnCounts(turns: TurnForCounting[]): number {
@@ -81,7 +79,7 @@ export function sumTurnCounts(turns: TurnForCounting[]): number {
 /**
  * Counts only "effective" turns — active turns where turnCount > 0.
  * A turn with turnCount = 0 (free/minor service) does NOT increment the count.
- * Includes assigned, in_service, and completed turns.
+ * Includes only turns that have started.
  * This is the number shown on the dashboard as "turnsTakenToday".
  */
 export function countEffectiveTurns(turns: TurnForCounting[]): number {
@@ -119,8 +117,8 @@ export function calculateTurnCount(
 /**
  * Ranks available, clocked-in workers in round-robin order.
  *
- * Round-robin logic: the worker whose last turn ended the longest ago
- * (or who hasn't had a turn yet today) is ranked first.
+ * Round-robin logic: available workers first, then fewest turns, then the
+ * worker whose last turn ended longest ago, then lower sales, then name.
  *
  * Secondary sort: by name (alphabetical) for stable ordering.
  */
@@ -134,15 +132,26 @@ export function rankSuggestedWorkers(workers: WorkerRankingInput[]): SuggestedWo
         worker.status !== "in_service",
     )
     .sort((left, right) => {
-      // Primary: round-robin — who hasn't had a turn the longest?
-      // null = never had a turn today → treated as "oldest" → goes first
+      const leftStatusRank = statusRank(left.status);
+      const rightStatusRank = statusRank(right.status);
+      if (leftStatusRank !== rightStatusRank) {
+        return leftStatusRank - rightStatusRank;
+      }
+
+      if (left.turnsTakenToday !== right.turnsTakenToday) {
+        return left.turnsTakenToday - right.turnsTakenToday;
+      }
+
       const leftTime = timestampOrNever(left.lastTurnEndedAt);
       const rightTime = timestampOrNever(right.lastTurnEndedAt);
       if (leftTime !== rightTime) {
         return leftTime - rightTime;
       }
 
-      // Secondary: alphabetical by name for stable ordering
+      if (left.salesTodayCents !== right.salesTodayCents) {
+        return left.salesTodayCents - right.salesTodayCents;
+      }
+
       return left.name.localeCompare(right.name);
     })
     .map((worker, index) => ({
@@ -162,4 +171,8 @@ function timestampOrNever(value: Date | string | null): number {
     return -1; // never had a turn → highest priority (sorts before any real timestamp)
   }
   return new Date(value).getTime();
+}
+
+function statusRank(status: WorkerStatus): number {
+  return status === "available" ? 0 : 1;
 }
