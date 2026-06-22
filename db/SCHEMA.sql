@@ -43,7 +43,7 @@ CREATE TABLE workers (
 CREATE TABLE customers (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL,
-  phone TEXT,
+  phone TEXT NOT NULL UNIQUE,
   email TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()

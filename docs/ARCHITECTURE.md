@@ -153,6 +153,30 @@ CLOVER_PAYMENT_TIMEOUT_MS=120000
 
 The first Cloud REST version consumes already-provisioned credentials; it does not implement Clover OAuth/install token exchange. Secrets must remain in local environment/runtime configuration and are only returned to Owner POS as masked previews.
 
+### Tip-on-terminal flow
+
+Tips are always entered by the customer on the Clover Mini, never pre-set by the POS.
+
+```
+TerminalSaleRequest  →  amountCents (base, no tip)
+TerminalPaymentResult ←  amountCents + tipCents (both returned after approval)
+```
+
+Step-by-step:
+
+1. POS sends `amountCents` = balance due (cash/gift card already deducted) to the terminal. No tip is sent.
+2. Clover Mini displays the total and prompts the customer for a tip.
+3. Customer selects or enters a tip on the Clover screen.
+4. Clover approves the full charge and returns `tipCents` in `TerminalPaymentResult`.
+5. The API stores `payment.amountCents = base + tip` (so sale completion math works correctly) and `tipCents` separately for reporting.
+6. `tipCents` is returned to the POS in the card payment response.
+7. The POS opens a tip distribution screen. The auto-split is proportional to each worker's net service amount on the order.
+8. The owner can adjust per-worker tip amounts via on-screen numpad. Adjusting one worker rebalances the others automatically; the total always stays locked to the terminal-approved tip.
+9. Owner confirms → `POST /api/sales/:id/tip-distribution` updates each sale item's `tipCents` and recomputes `tipTotalCents` on the sale.
+10. Sale total now equals `amountPaidCents`, and Complete Sale becomes available.
+
+The `MockTerminalAdapter` simulates an 18% tip for local development.
+
 ## Clover facts to respect
 
 Clover REST Pay Display supports Clover Flex and Clover Mini and allows POS apps to accept payments on those devices. It supports local and cloud connection options. A local connection uses an embedded server within REST Pay Display on the Clover device to broker messages between POS and device.

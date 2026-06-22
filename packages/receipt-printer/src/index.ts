@@ -5,16 +5,27 @@ export type ReceiptLineItem = {
   tipCents: number;
 };
 
+export type ReceiptPaymentLine = {
+  method: string;
+  amountCents: number;
+  tipCents: number;
+  reference?: string | null;
+};
+
 export type ReceiptDocument = {
   salonName: string;
+  salonAddress?: string;
+  salonPhone?: string;
   receiptNumber: string;
   issuedAt: Date;
+  customerName?: string | null;
   items: ReceiptLineItem[];
   subtotalCents: number;
   discountCents: number;
   tipCents: number;
   totalCents: number;
   paymentSummary: string;
+  payments?: ReceiptPaymentLine[];
 };
 
 export type PrintResult = {

@@ -7,9 +7,10 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate dev",
-    "prisma:seed": "prisma db seed",
+    "prisma:generate": "node scripts/with-root-env.mjs prisma generate",
+    "prisma:migrate": "node scripts/with-root-env.mjs prisma generate && node scripts/with-root-env.mjs prisma migrate deploy",
+    "prisma:migrate:dev": "node scripts/with-root-env.mjs prisma migrate dev",
+    "prisma:seed": "node scripts/with-root-env.mjs prisma db seed",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

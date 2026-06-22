@@ -8,16 +8,27 @@ export type TerminalConnectionStatus = {
 
 export type TerminalSaleRequest = {
   amountCents: number;
-  tipCents: number;
   idempotencyKey: string;
+<<<<<<< HEAD
   saleId?: string;
+=======
+  // tipCents is NOT sent to the terminal — the customer enters their tip directly
+  // on the Clover Mini screen. The approved tip is returned in TerminalPaymentResult.
+>>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
 };
 
 export type TerminalPaymentStatus = "approved" | "declined" | "cancelled" | "failed";
 
 export type TerminalPaymentResult = {
   status: TerminalPaymentStatus;
+<<<<<<< HEAD
   provider?: "mock" | "clover";
+=======
+  /** Base amount approved (cents), excluding tip. */
+  amountCents?: number;
+  /** Tip amount entered by the customer on the terminal (cents). Only set when approved. */
+  tipCents?: number;
+>>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
   providerPaymentId?: string;
   providerOrderId?: string;
   externalPaymentId?: string;
@@ -96,10 +107,19 @@ export class MockTerminalAdapter implements PaymentTerminalAdapter {
       return { status, message: `Mock ${status}` };
     }
 
+<<<<<<< HEAD
     const tipCents = this.nextTipCents;
     const result: TerminalPaymentResult = {
       status,
       provider: "mock",
+=======
+    // Simulate customer entering an 18% tip on the Clover Mini screen.
+    const tipCents = Math.round(input.amountCents * 0.18);
+    const result: TerminalPaymentResult = {
+      status,
+      amountCents: input.amountCents,
+      tipCents,
+>>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
       providerPaymentId: `mock_${input.idempotencyKey}`,
       providerOrderId: input.saleId ? `mock_order_${input.saleId}` : undefined,
       externalPaymentId: input.idempotencyKey,

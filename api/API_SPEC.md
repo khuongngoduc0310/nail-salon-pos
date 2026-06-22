@@ -156,6 +156,56 @@ Returns current-session worker clock records, including both actively clocked-in
 ### POST /customers
 
 Create customer.
+Phone is required and normalized to E.164-style (`+15551234567`).
+
+## Customer auth (phone-first)
+
+### POST /customer/auth/start
+
+Simple customer login/sign-up with phone identity.
+
+Request:
+
+```json
+{
+  "phone": "(555) 123-4567",
+  "name": "Mary"
+}
+```
+
+Response:
+
+```json
+{
+  "customer": {
+    "id": "uuid",
+    "name": "Mary",
+    "phone": "+15551234567"
+  },
+  "token": "customer-session-token",
+  "expiresAt": "2026-05-25T21:00:00.000Z"
+}
+```
+
+### GET /customer/me
+
+Returns authenticated customer profile.
+
+### GET /customer/me/appointments
+
+Returns authenticated customer's appointments.
+
+### POST /customer/me/appointments
+
+Creates appointment for authenticated customer.
+
+### GET /customer/me/checkins
+
+Returns authenticated customer's check-ins.
+
+### POST /customer/me/checkins
+
+Creates walk-in or appointment check-in for authenticated customer.
 
 ### POST /checkins
 
@@ -353,7 +403,30 @@ Completes sale only if `amount_paid_cents >= total_cents`.
 
 ### POST /sales/:id/refunds
 
-Owner only.
+Records a refund against a paid sale. Card refunds call the configured payment terminal adapter when the payment has a provider reference. Cash and gift-card refunds are recorded locally.
+
+Request:
+
+```json
+{
+  "paymentId": "uuid-optional",
+  "amountCents": 12000,
+  "reason": "Customer refund",
+  "approvedByUserId": "uuid-optional"
+}
+```
+
+Response:
+
+```json
+{
+  "refund": { "id": "uuid", "saleId": "uuid", "amountCents": 12000 },
+  "sale": { "id": "uuid", "status": "refunded" },
+  "terminalRefund": null
+}
+```
+
+The API rejects refunds for unpaid sales and rejects amounts above the approved payment total minus existing refunds.
 
 ## Receipts
 

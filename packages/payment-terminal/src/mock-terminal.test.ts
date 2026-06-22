@@ -6,7 +6,11 @@ describe("MockTerminalAdapter", () => {
     const adapter = new MockTerminalAdapter("approved", 1000);
 
     await expect(
+<<<<<<< HEAD
       adapter.startSale({ amountCents: 6000, tipCents: 0, idempotencyKey: "abc", saleId: "sale-1" })
+=======
+      adapter.startSale({ amountCents: 6000, idempotencyKey: "abc" })
+>>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
     ).resolves.toMatchObject({
       status: "approved",
       providerPaymentId: "mock_abc",
@@ -25,7 +29,7 @@ describe("MockTerminalAdapter", () => {
   it.each(["declined", "cancelled", "failed"] as const)("represents %s without Clover", async (status) => {
     const adapter = new MockTerminalAdapter(status);
 
-    await expect(adapter.startSale({ amountCents: 6000, tipCents: 0, idempotencyKey: status })).resolves.toMatchObject({
+    await expect(adapter.startSale({ amountCents: 6000, idempotencyKey: status })).resolves.toMatchObject({
       status,
     });
   });

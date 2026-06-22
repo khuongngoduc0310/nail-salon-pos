@@ -66,6 +66,22 @@
   box-sizing: border-box;
 }
 
+:root {
+  --ink: #1f261f;
+  --muted: #697066;
+  --line: #ded6c7;
+  --paper: #fffaf0;
+  --paper-strong: #fff4dd;
+  --green: #285c4d;
+  --green-dark: #1d4539;
+  --clay: #a45f3c;
+  --gold: #d9a441;
+  --blue: #2d5c8e;
+  --blue-light: #e8f0f7;
+  color: var(--ink);
+  font-family: "Trebuchet MS", "Avenir Next", Verdana, sans-serif;
+}
+
 body {
   margin: 0;
   font-family: var(--font-family);
@@ -144,7 +160,7 @@ h1 {
   flex-wrap: wrap;
 }
 
-.grid {
+.svc-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: var(--space-4);
@@ -1736,6 +1752,8 @@ th { color: var(--color-text-muted); font-size: var(--text-xs); font-weight: var
   font-weight: var(--font-bold);
   cursor: pointer;
   list-style: none;
+  display: grid;
+  gap: 6px;
 }
 
 .terminal-info-popover summary::-webkit-details-marker {

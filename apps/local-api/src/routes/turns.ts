@@ -11,6 +11,12 @@ import type { DbClient } from "../db.js";
 import { HttpError, asObject, getParams, getQuery, handleRouteError, optionalString, requiredString } from "../http.js";
 import { broadcast } from "../ws/events.js";
 
+type WorkSessionRecord = {
+  id: string;
+  businessDate: Date | string;
+  status: "open" | "closed";
+};
+
 type WorkerRecord = {
   id: string;
   displayName: string;
@@ -27,10 +33,15 @@ type TurnRecord = {
   startedAt: Date | string | null;
   endedAt?: Date | string | null;
   completedAt?: Date | string | null;
-  customer?: unknown;
+  customer?: CustomerRecord | null;
+  checkin?: { customer?: CustomerRecord | null; notes?: string | null } | null;
   checkinId?: string | null;
   appointmentId?: string | null;
+<<<<<<< HEAD
   saleId?: string | null;
+=======
+  workerId?: string | null;
+>>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
 };
 
 type SaleItemRecord = {
@@ -38,9 +49,16 @@ type SaleItemRecord = {
   tipCents?: number;
 };
 
+type CustomerRecord = {
+  id: string;
+  name?: string | null;
+  phone?: string | null;
+};
+
 export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
   app.get("/api/turns/dashboard", async (request, reply) => {
     try {
+<<<<<<< HEAD
       const query = getQuery(request);
       const currentSessionOnly = optionalString(query.currentSessionOnly, "currentSessionOnly") === "true";
       const currentSession = currentSessionOnly ? await getCurrentSession(db) : null;
@@ -54,18 +72,39 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
         ? workers.filter((worker) => worker.checkedIn)
         : workers;
       const suggestions = rankSuggestedWorkers(suggestionCandidates.map(toRankingInput));
+=======
+      const session = await loadCurrentOpenSession(db);
+      const workers = await loadDashboardWorkers(db, session?.id ?? null);
+      const suggestions = rankSuggestedWorkers(workers.map(toRankingInput));
+>>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
       const rankByWorker = new Map(suggestions.map((worker) => [worker.workerId, worker.suggestionRank]));
 
       return {
+        scope: "session" as const,
+        session: session
+          ? {
+              id: session.id,
+              businessDate: new Date(session.businessDate).toISOString(),
+              status: session.status,
+            }
+          : null,
         workers: workers.map((worker) => ({
           workerId: worker.id,
           name: worker.displayName,
           status: worker.currentStatus,
+<<<<<<< HEAD
           turnsTakenToday: countEffectiveTurns(worker.turns ?? []),
+=======
+          turnsTakenSession: countTurnsTaken(worker.turns ?? []),
+>>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
           lastTurnEndedAt: getLastTurnEndedAt(worker.turns ?? []),
           activeTurn: getActiveTurn(worker.turns ?? []),
-          salesTodayCents: getSalesTodayCents(worker.saleItems ?? []),
-          tipsTodayCents: getTipsTodayCents(worker.saleItems ?? []),
+          salesSessionCents: getSalesSessionCents(worker.saleItems ?? []),
+          tipsSessionCents: getTipsSessionCents(worker.saleItems ?? []),
+          // Compatibility aliases. Remove after client migration.
+          turnsTakenToday: countTurnsTaken(worker.turns ?? []),
+          salesTodayCents: getSalesSessionCents(worker.saleItems ?? []),
+          tipsTodayCents: getTipsSessionCents(worker.saleItems ?? []),
           suggestionRank: rankByWorker.get(worker.id) ?? null,
           checkedIn: worker.checkedIn,
           turns: (worker.turns ?? []).map((t: any) => ({
@@ -84,12 +123,17 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
 
   app.post("/api/turns/suggest", async (_request, reply) => {
     try {
+<<<<<<< HEAD
       const currentSession = await getCurrentSession(db);
       if (!currentSession) {
         return { workers: [] };
       }
 
       const workers = await loadDashboardWorkers(db, currentSession.id);
+=======
+      const session = await loadCurrentOpenSession(db);
+      const workers = await loadDashboardWorkers(db, session?.id ?? null);
+>>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
       return { workers: rankSuggestedWorkers(workers.map(toRankingInput)) };
     } catch (error) {
       return handleRouteError(error, reply);
@@ -100,6 +144,7 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
     try {
       const body = asObject(request.body);
       const result = await db.$transaction(async (tx) => {
+<<<<<<< HEAD
         const workerId = requiredString(body.workerId, "workerId");
         const session = await getCurrentSession(tx);
         if (!session) {
@@ -127,6 +172,19 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
             workerId,
             sessionId: session.id,
             turnCount,
+=======
+        const checkinId = requiredString(body.checkinId, "checkinId");
+        const checkins = (await tx.checkin.findMany({
+          where: { id: checkinId },
+          take: 1,
+        })) as Array<{ sessionId?: string | null }>;
+        const sessionId = checkins[0]?.sessionId ?? undefined;
+        const turn = await tx.turn.create({
+          data: {
+            checkinId,
+            sessionId,
+            workerId: requiredString(body.workerId, "workerId"),
+>>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
             turnType: optionalString(body.turnType, "turnType") ?? "manual",
             suggestedWorkerId: optionalString(body.suggestedWorkerId, "suggestedWorkerId"),
             ownerOverrideReason: optionalString(body.ownerOverrideReason, "ownerOverrideReason"),
@@ -135,7 +193,7 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
           },
         });
         const checkin = await tx.checkin.update({
-          where: { id: requiredString(body.checkinId, "checkinId") },
+          where: { id: checkinId },
           data: { status: "assigned" },
         });
 
@@ -155,7 +213,6 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
       const body = asObject(request.body ?? {});
       const now = getActionTime(body);
       const turnId = requiredString(params.id, "id");
-      const workerId = requiredString(body.workerId, "workerId");
       const checkinId = optionalString(body.checkinId, "checkinId");
 
       const result = await db.$transaction(async (tx) => {
@@ -163,15 +220,11 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
           where: { id: turnId },
           data: { status: "in_service", startedAt: now },
         });
-        const worker = await tx.worker.update({
-          where: { id: workerId },
-          data: { currentStatus: "in_service" },
-        });
         const checkin = checkinId
           ? await tx.checkin.update({ where: { id: checkinId }, data: { status: "in_service" } })
           : null;
 
-        return { turn, worker, checkin };
+        return { turn, checkin };
       });
 
       broadcast("turn:started", { result });
@@ -187,7 +240,6 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
       const body = asObject(request.body ?? {});
       const now = getActionTime(body);
       const turnId = requiredString(params.id, "id");
-      const workerId = requiredString(body.workerId, "workerId");
       const checkinId = optionalString(body.checkinId, "checkinId");
 
       const result = await db.$transaction(async (tx) => {
@@ -195,15 +247,11 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
           where: { id: turnId },
           data: { status: "completed", endedAt: now, completedAt: now },
         });
-        const worker = await tx.worker.update({
-          where: { id: workerId },
-          data: { currentStatus: "available" },
-        });
         const checkin = checkinId
           ? await tx.checkin.update({ where: { id: checkinId }, data: { status: "ready_for_checkout" } })
           : null;
 
-        return { turn, worker, checkin };
+        return { turn, checkin };
       });
 
       broadcast("turn:completed", { result });
@@ -219,7 +267,6 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
       const body = asObject(request.body ?? {});
       const now = getActionTime(body);
       const turnId = requiredString(params.id, "id");
-      const workerId = optionalString(body.workerId, "workerId");
 
       const result = await db.$transaction(async (tx) => {
         const turn = await tx.turn.update({
@@ -230,11 +277,7 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
             skippedReason: optionalString(body.skippedReason, "skippedReason"),
           },
         });
-        const worker = workerId
-          ? await tx.worker.update({ where: { id: workerId }, data: { currentStatus: "available" } })
-          : null;
-
-        return { turn, worker };
+        return { turn };
       });
 
       broadcast("turn:skipped", { result });
@@ -262,6 +305,7 @@ export async function registerTurnRoutes(app: FastifyInstance, db: DbClient) {
   });
 }
 
+<<<<<<< HEAD
 /**
  * Resolves the turnCount for a new turn assignment.
  *
@@ -317,6 +361,46 @@ async function loadDashboardWorkers(db: DbClient, sessionId?: string): Promise<(
         where: sessionId
           ? { sale: { sessionId }, status: "active" }
           : { createdAt: { gte: start, lt: end }, status: "active" },
+=======
+async function loadCurrentOpenSession(db: DbClient): Promise<WorkSessionRecord | null> {
+  const sessions = (await db.workSession.findMany({
+    where: { status: "open" },
+    orderBy: [{ openedAt: "desc" }],
+    take: 1,
+  })) as WorkSessionRecord[];
+  return sessions[0] ?? null;
+}
+
+async function loadDashboardWorkers(db: DbClient, sessionId: string | null): Promise<WorkerRecord[]> {
+  if (!sessionId) {
+    const workers = await db.worker.findMany({
+      where: { active: true },
+      orderBy: [{ sortOrder: "asc" }, { displayName: "asc" }],
+    });
+    return (workers as WorkerRecord[]).map((worker) => ({
+      ...worker,
+      turns: [],
+      saleItems: [],
+    }));
+  }
+
+  const workers = await db.worker.findMany({
+    where: { active: true },
+    include: {
+      turns: {
+        where: {
+          OR: [{ checkin: { sessionId } }, { sessionId }],
+        },
+        include: { customer: true, checkin: { include: { customer: true } } },
+      },
+      saleItems: {
+        where: {
+          status: "active",
+          sale: {
+            OR: [{ checkin: { sessionId } }, { sessionId }],
+          },
+        },
+>>>>>>> bdf0b2066dfcb2e3e613cb86c08bdfaba329da34
       },
       workerSessions: sessionId
         ? { where: { sessionId } }
@@ -365,14 +449,37 @@ function toRankingInput(worker: WorkerRecord): WorkerRankingInput {
     status: worker.currentStatus,
     turnsTakenToday: countEffectiveTurns(worker.turns ?? []),
     lastTurnEndedAt: getLastTurnEndedAt(worker.turns ?? []),
-    salesTodayCents: getSalesTodayCents(worker.saleItems ?? []),
+    salesTodayCents: getSalesSessionCents(worker.saleItems ?? []),
     activeTurn: getActiveTurn(worker.turns ?? []),
     checkedIn: worker.checkedIn,
   };
 }
 
 function getActiveTurn(turns: TurnRecord[]): TurnRecord | null {
-  return turns.find((turn) => turn.status === "in_service") ?? null;
+  const active = turns.find((turn) => turn.status === "in_service" || turn.status === "assigned");
+  if (!active) {
+    return null;
+  }
+
+  const customer = active.customer ?? active.checkin?.customer ?? null;
+
+  return {
+    id: active.id,
+    status: active.status,
+    startedAt: active.startedAt,
+    endedAt: active.endedAt,
+    completedAt: active.completedAt,
+    checkinId: active.checkinId,
+    appointmentId: active.appointmentId,
+    workerId: active.workerId,
+    customer,
+    checkin: active.checkin
+      ? {
+          notes: active.checkin.notes,
+          customer,
+        }
+      : null,
+  };
 }
 
 function getLastTurnEndedAt(turns: TurnRecord[]): Date | string | null {
@@ -383,29 +490,17 @@ function getLastTurnEndedAt(turns: TurnRecord[]): Date | string | null {
   return completedTurns[0]?.endedAt ?? completedTurns[0]?.completedAt ?? null;
 }
 
-function getSalesTodayCents(items: SaleItemRecord[]): number {
+function getSalesSessionCents(items: SaleItemRecord[]): number {
   return items.reduce((sum, item) => sum + (item.finalServiceCents ?? 0), 0);
 }
 
-function getTipsTodayCents(items: SaleItemRecord[]): number {
+function getTipsSessionCents(items: SaleItemRecord[]): number {
   return items.reduce((sum, item) => sum + (item.tipCents ?? 0), 0);
 }
 
 function getActionTime(body: Record<string, unknown>): Date {
   const requested = optionalString(body.actionAt, "actionAt");
   return requested ? new Date(requested) : new Date();
-}
-
-function startOfToday(): Date {
-  const date = new Date();
-  date.setHours(0, 0, 0, 0);
-  return date;
-}
-
-function endOfToday(start: Date): Date {
-  const end = new Date(start);
-  end.setDate(end.getDate() + 1);
-  return end;
 }
 
 function toTime(value: Date | string | null | undefined): number {
