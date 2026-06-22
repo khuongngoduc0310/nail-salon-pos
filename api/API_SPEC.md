@@ -392,7 +392,7 @@ All reports accept:
 
 ### GET /terminal/config
 
-Returns safe current terminal configuration for the Checkout tab. Secret fields such as Clover access/auth tokens are not returned in full; response only includes configured flags and masked previews.
+Returns safe current terminal configuration for the Checkout tab. Secret fields such as Clover access tokens, app secrets, and auth tokens are not returned in full; response only includes configured flags and masked previews.
 
 ### PATCH /terminal/config
 
@@ -400,10 +400,13 @@ Applies terminal configuration from the Checkout tab and rebuilds the active loc
 
 Supported fields include:
 
-- `transport`: `mock`, `ws-lan`, `rest-local`, or `usb-sidecar`
+- `transport`: `mock`, `ws-lan`, `rest-cloud`, `rest-local`, or `usb-sidecar`
 - `wsHost`, `wsPort`, `wsPath`, `wsSecure` for real Clover LAN WebSocket
 - `remoteApplicationId`, `posName`, `serialNumber`, optional `authToken`
+- `cloudBaseUrl`, `merchantId`, `appId`, `deviceId`, `posId`, optional `remoteApplicationId`, `accessToken`, and `appSecret` for Clover Cloud REST Pay Display
 - `deviceBaseUrl`, `deviceId`, `posId`, optional `accessToken` for REST-local/mock Clover
+
+Blank `accessToken`, `appSecret`, or `authToken` updates preserve any existing local secret. Clover OAuth/install flow is not exposed by this endpoint; tokens are manually provisioned for the first Cloud REST version.
 
 Returns `{ config, status }`.
 

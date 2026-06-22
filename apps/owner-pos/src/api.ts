@@ -1,5 +1,9 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:4000/api";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? getDefaultApiBaseUrl();
 const OWNER_AUTH_ID = import.meta.env.VITE_OWNER_AUTH_ID ?? "owner@example.com";
+
+function getDefaultApiBaseUrl(): string {
+  return `http://${window.location.hostname}:4000/api`;
+}
 
 /* ════════════════════════════════════════
    Types
@@ -559,7 +563,10 @@ export type TerminalStatus = {
 };
 
 export type TerminalConfig = {
-  transport: "mock" | "rest-local" | "usb-sidecar" | "ws-lan";
+  transport: "mock" | "rest-local" | "rest-cloud" | "usb-sidecar" | "ws-lan";
+  cloudBaseUrl?: string;
+  merchantId?: string;
+  appId?: string;
   deviceBaseUrl?: string;
   deviceId?: string;
   posId?: string;
@@ -574,13 +581,16 @@ export type TerminalConfig = {
   posName?: string;
   serialNumber?: string;
   accessTokenConfigured?: boolean;
+  appSecretConfigured?: boolean;
   authTokenConfigured?: boolean;
   accessTokenPreview?: string;
+  appSecretPreview?: string;
   authTokenPreview?: string;
 };
 
 export type TerminalConfigUpdate = Partial<TerminalConfig> & {
   accessToken?: string;
+  appSecret?: string;
   authToken?: string;
 };
 

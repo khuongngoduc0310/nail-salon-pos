@@ -2,9 +2,13 @@ import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
-const API_BASE = import.meta.env?.VITE_API_BASE_URL ?? "http://localhost:4000/api";
+const API_BASE = import.meta.env?.VITE_API_BASE_URL ?? getDefaultApiBaseUrl();
 const WORKER_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const WORKER_SESSION_STORAGE_KEY = "nail.workerPwa.session";
+
+function getDefaultApiBaseUrl(): string {
+  return `http://${window.location.hostname}:4000/api`;
+}
 
 /* ════════════════════════════════════════
    HTTP helpers — pass token when available

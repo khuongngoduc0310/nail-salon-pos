@@ -183,10 +183,20 @@ function parseTerminalConfigUpdate(value: unknown): TerminalConfigUpdate {
   const body = asRecord(value);
   const update: TerminalConfigUpdate = {};
   if (body.transport !== undefined) update.transport = parseTerminalTransport(body.transport);
+  if (body.cloudBaseUrl !== undefined) update.cloudBaseUrl = optionalString(body.cloudBaseUrl, "cloudBaseUrl");
+  if (body.merchantId !== undefined) update.merchantId = optionalString(body.merchantId, "merchantId");
+  if (body.appId !== undefined) update.appId = optionalString(body.appId, "appId");
+  if (body.appSecret !== undefined) {
+    const appSecret = optionalString(body.appSecret, "appSecret");
+    if (appSecret) update.appSecret = appSecret;
+  }
   if (body.deviceBaseUrl !== undefined) update.deviceBaseUrl = optionalString(body.deviceBaseUrl, "deviceBaseUrl");
   if (body.deviceId !== undefined) update.deviceId = optionalString(body.deviceId, "deviceId");
   if (body.posId !== undefined) update.posId = optionalString(body.posId, "posId");
-  if (body.accessToken !== undefined) update.accessToken = optionalString(body.accessToken, "accessToken");
+  if (body.accessToken !== undefined) {
+    const accessToken = optionalString(body.accessToken, "accessToken");
+    if (accessToken) update.accessToken = accessToken;
+  }
   if (body.usbSidecarUrl !== undefined) update.usbSidecarUrl = optionalString(body.usbSidecarUrl, "usbSidecarUrl");
   if (body.wsUrl !== undefined) update.wsUrl = optionalString(body.wsUrl, "wsUrl");
   if (body.wsHost !== undefined) update.wsHost = optionalString(body.wsHost, "wsHost");
@@ -197,7 +207,10 @@ function parseTerminalConfigUpdate(value: unknown): TerminalConfigUpdate {
   if (body.remoteApplicationId !== undefined) update.remoteApplicationId = optionalString(body.remoteApplicationId, "remoteApplicationId");
   if (body.posName !== undefined) update.posName = optionalString(body.posName, "posName");
   if (body.serialNumber !== undefined) update.serialNumber = optionalString(body.serialNumber, "serialNumber");
-  if (body.authToken !== undefined) update.authToken = optionalString(body.authToken, "authToken");
+  if (body.authToken !== undefined) {
+    const authToken = optionalString(body.authToken, "authToken");
+    if (authToken) update.authToken = authToken;
+  }
   return update;
 }
 

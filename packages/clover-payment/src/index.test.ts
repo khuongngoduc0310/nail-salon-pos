@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CloverCloudPayDisplayAdapter,
   MockCloverPaymentAdapter,
   RestPayDisplayAdapter,
   UsbSidecarAdapter,
@@ -74,6 +75,44 @@ describe("Clover config", () => {
       "CLOVER_POS_ID is required for rest-local transport",
       "CLOVER_ACCESS_TOKEN is required for rest-local transport",
     ]);
+  });
+
+  it("validates rest-cloud required fields", () => {
+    expect(validateCloverPaymentConfig({ transport: "rest-cloud" })).toEqual([
+      "CLOVER_CLOUD_BASE_URL is required for rest-cloud transport",
+      "CLOVER_MERCHANT_ID is required for rest-cloud transport",
+      "CLOVER_APP_ID is required for rest-cloud transport",
+      "CLOVER_APP_SECRET is required for rest-cloud transport",
+      "CLOVER_DEVICE_ID is required for rest-cloud transport",
+      "CLOVER_POS_ID is required for rest-cloud transport",
+      "CLOVER_ACCESS_TOKEN is required for rest-cloud transport",
+    ]);
+  });
+
+  it("loads rest-cloud environment config", () => {
+    expect(loadCloverPaymentConfig({
+      CLOVER_TRANSPORT: "rest-cloud",
+      CLOVER_CLOUD_BASE_URL: "https://sandbox.clover.example/connect",
+      CLOVER_MERCHANT_ID: "MERCHANT123",
+      CLOVER_APP_ID: "APP123",
+      CLOVER_APP_SECRET: "secret",
+      CLOVER_ACCESS_TOKEN: "access",
+      CLOVER_DEVICE_ID: "device-1",
+      CLOVER_POS_ID: "owner-pos",
+      CLOVER_REMOTE_APP_ID: "DEV.APP123",
+      CLOVER_PAYMENT_TIMEOUT_MS: "90000",
+    })).toMatchObject({
+      transport: "rest-cloud",
+      cloudBaseUrl: "https://sandbox.clover.example/connect",
+      merchantId: "MERCHANT123",
+      appId: "APP123",
+      appSecret: "secret",
+      accessToken: "access",
+      deviceId: "device-1",
+      posId: "owner-pos",
+      remoteApplicationId: "DEV.APP123",
+      wsTimeoutMs: 90000,
+    });
   });
 
   it("validates usb sidecar URL", () => {
@@ -184,6 +223,66 @@ describe("HTTP adapters", () => {
     expect(result.rawProviderReference).not.toHaveProperty("payment.cardTransaction.cardNumber");
     expect(JSON.stringify(result.rawProviderReference)).not.toContain("4111111111111111");
     expect(JSON.stringify(result.rawProviderReference)).not.toContain("emvData");
+  });
+
+  it("maps Cloud REST Pay Display sales to configured cloud endpoint and required context", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const http = jsonFetch(calls, {
+      payment: {
+        result: "SUCCESS",
+        id: "cloud-payment-1",
+        amount: 4500,
+        externalPaymentId: "idem-cloud",
+        order: { id: "cloud-order-1" },
+        cardTransaction: {
+          authCode: "CLOUDOK",
+          cardType: "VISA",
+          last4: "1111",
+          pan: "4111111111111111",
+          rawEmv: "raw",
+        },
+      },
+    });
+    const adapter = new CloverCloudPayDisplayAdapter(
+      {
+        transport: "rest-cloud",
+        cloudBaseUrl: "https://sandbox.clover.example/card-present",
+        merchantId: "MERCHANT123",
+        appId: "APP123",
+        appSecret: "secret",
+        accessToken: "token",
+        deviceId: "mini-cloud",
+        posId: "owner-pos",
+        remoteApplicationId: "DEV.APP123",
+      },
+      { fetch: http }
+    );
+
+    const result = await adapter.startCardSale({ amountCents: 4500, idempotencyKey: "idem-cloud", tipFlow: "none" });
+
+    expect(calls[0].url).toBe("https://sandbox.clover.example/card-present/v1/payments");
+    expect((calls[0].init?.headers as Headers).get("Authorization")).toBe("Bearer token");
+    expect((calls[0].init?.headers as Headers).get("X-Clover-Merchant-Id")).toBe("MERCHANT123");
+    expect((calls[0].init?.headers as Headers).get("X-Clover-App-Id")).toBe("APP123");
+    expect((calls[0].init?.headers as Headers).get("X-Clover-Device-Id")).toBe("mini-cloud");
+    expect((calls[0].init?.headers as Headers).get("X-POS-ID")).toBe("owner-pos");
+    expect((calls[0].init?.headers as Headers).get("X-Clover-Remote-App-Id")).toBe("DEV.APP123");
+    expect((calls[0].init?.headers as Headers).has("X-Clover-App-Secret")).toBe(false);
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({ amount: 4500, externalPaymentId: "idem-cloud" });
+    expect(result).toMatchObject({
+      status: "approved",
+      providerPaymentId: "cloud-payment-1",
+      providerOrderId: "cloud-order-1",
+      externalPaymentId: "idem-cloud",
+      baseAmountCents: 4500,
+      tipCents: 0,
+      totalChargedCents: 4500,
+      authCode: "CLOUDOK",
+      cardBrand: "VISA",
+      cardLast4: "1111",
+    });
+    expect(JSON.stringify(result.rawProviderReference)).not.toContain("4111111111111111");
+    expect(JSON.stringify(result.rawProviderReference)).not.toContain("rawEmv");
   });
 
   it("uses Clover read-tip before payment when requested", async () => {

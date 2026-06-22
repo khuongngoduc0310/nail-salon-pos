@@ -2073,6 +2073,10 @@ type CheckoutMode = "active" | "done";
 
 type TerminalConfigForm = {
   transport: TerminalConfig["transport"];
+  cloudBaseUrl: string;
+  merchantId: string;
+  appId: string;
+  appSecret: string;
   deviceBaseUrl: string;
   deviceId: string;
   posId: string;
@@ -2090,6 +2094,10 @@ type TerminalConfigForm = {
 function defaultTerminalConfigForm(): TerminalConfigForm {
   return {
     transport: "mock",
+    cloudBaseUrl: "",
+    merchantId: "",
+    appId: "",
+    appSecret: "",
     deviceBaseUrl: "http://localhost:4100",
     deviceId: "mock-clover-mini-1",
     posId: "owner-pos-dev",
@@ -2109,6 +2117,9 @@ function formFromTerminalConfig(config: TerminalConfig): TerminalConfigForm {
   return {
     ...defaultTerminalConfigForm(),
     transport: config.transport,
+    cloudBaseUrl: config.cloudBaseUrl ?? "",
+    merchantId: config.merchantId ?? "",
+    appId: config.appId ?? "",
     deviceBaseUrl: config.deviceBaseUrl ?? "",
     deviceId: config.deviceId ?? "",
     posId: config.posId ?? "",
@@ -2126,6 +2137,10 @@ function updateFromTerminalConfigForm(form: TerminalConfigForm) {
   const wsPort = Number(form.wsPort || 0);
   return {
     transport: form.transport,
+    cloudBaseUrl: form.cloudBaseUrl.trim() || undefined,
+    merchantId: form.merchantId.trim() || undefined,
+    appId: form.appId.trim() || undefined,
+    appSecret: form.appSecret.trim() || undefined,
     deviceBaseUrl: form.deviceBaseUrl.trim() || undefined,
     deviceId: form.deviceId.trim() || undefined,
     posId: form.posId.trim() || undefined,
@@ -2143,14 +2158,14 @@ function updateFromTerminalConfigForm(form: TerminalConfigForm) {
 
 const TERMINAL_CONFIG_STORAGE_KEY = "nail.ownerPos.terminalConfig.v1";
 
-type StoredTerminalConfigForm = Omit<TerminalConfigForm, "accessToken" | "authToken">;
+type StoredTerminalConfigForm = Omit<TerminalConfigForm, "accessToken" | "appSecret" | "authToken">;
 
 function readStoredTerminalConfigForm(): TerminalConfigForm | null {
   try {
     const raw = window.localStorage.getItem(TERMINAL_CONFIG_STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<StoredTerminalConfigForm>;
-    if (parsed.transport !== "mock" && parsed.transport !== "rest-local" && parsed.transport !== "usb-sidecar" && parsed.transport !== "ws-lan") {
+    if (parsed.transport !== "mock" && parsed.transport !== "rest-local" && parsed.transport !== "rest-cloud" && parsed.transport !== "usb-sidecar" && parsed.transport !== "ws-lan") {
       return null;
     }
     return {
@@ -2159,6 +2174,7 @@ function readStoredTerminalConfigForm(): TerminalConfigForm | null {
       wsPort: parsed.wsPort ? String(parsed.wsPort) : "12345",
       wsSecure: parsed.wsSecure ?? true,
       accessToken: "",
+      appSecret: "",
       authToken: "",
     };
   } catch {
@@ -2167,7 +2183,7 @@ function readStoredTerminalConfigForm(): TerminalConfigForm | null {
 }
 
 function storeTerminalConfigForm(form: TerminalConfigForm) {
-  const { accessToken: _accessToken, authToken: _authToken, ...safeForm } = form;
+  const { accessToken: _accessToken, appSecret: _appSecret, authToken: _authToken, ...safeForm } = form;
   window.localStorage.setItem(TERMINAL_CONFIG_STORAGE_KEY, JSON.stringify(safeForm));
 }
 
@@ -2255,17 +2271,30 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
     : null;
   const terminalTransport = terminalConfig?.transport ?? terminalConfigForm.transport;
   const isRealCloverLan = terminalTransport === "ws-lan";
-  const terminalEndpoint = terminalConfig?.wsUrl
-    ?? (terminalConfig?.wsHost
-      ? `${terminalConfig.wsSecure === false ? "ws" : "wss"}://${terminalConfig.wsHost}${terminalConfig.wsPort ? `:${terminalConfig.wsPort}` : ""}${terminalConfig.wsPath ?? "/remote_pay"}`
-      : "Not configured");
+  const isCloverCloudRest = terminalTransport === "rest-cloud";
+  const isRealCloverTransport = isRealCloverLan || isCloverCloudRest;
+  const terminalEndpoint = isCloverCloudRest
+    ? terminalConfig?.cloudBaseUrl ?? "Not configured"
+    : terminalTransport === "rest-local"
+      ? terminalConfig?.deviceBaseUrl ?? "Not configured"
+      : terminalConfig?.wsUrl
+        ?? (terminalConfig?.wsHost
+          ? `${terminalConfig.wsSecure === false ? "ws" : "wss"}://${terminalConfig.wsHost}${terminalConfig.wsPort ? `:${terminalConfig.wsPort}` : ""}${terminalConfig.wsPath ?? "/remote_pay"}`
+          : "Not configured");
+  const terminalDisplayName = isRealCloverLan
+    ? "Clover Mini 3 LAN"
+    : isCloverCloudRest
+      ? "Clover Cloud REST Pay Display"
+      : terminalTransport === "rest-local"
+        ? "Mock Clover REST"
+        : "Mock terminal";
   const terminalStep = terminalStatus?.connected
     ? "ready"
     : terminalStatus?.pairingCode
       ? "pair"
       : terminalStatusLoading
         ? "checking"
-        : isRealCloverLan
+        : isRealCloverTransport
           ? "waiting"
           : "offline";
 
@@ -2468,7 +2497,7 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
   }, [pairingModalOpen]);
 
   useEffect(() => {
-    if (activeMethod !== "card" || terminalConfig?.transport !== "ws-lan" || terminalStatus?.connected) return;
+    if (activeMethod !== "card" || (terminalConfig?.transport !== "ws-lan" && terminalConfig?.transport !== "rest-cloud") || terminalStatus?.connected) return;
     const intervalId = window.setInterval(() => { void refreshTerminalStatus(); }, 3000);
     return () => window.clearInterval(intervalId);
   }, [activeMethod, terminalConfig?.transport, terminalStatus?.connected]);
@@ -2600,11 +2629,11 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
   const prepareCardTerminal = async () => {
     const config = terminalConfig ?? await fetchTerminalConfig();
     setTerminalConfig(config);
-    if (config.transport !== "ws-lan") return;
+    if (config.transport !== "ws-lan" && config.transport !== "rest-cloud") return;
 
     const status = await fetchTerminalStatus();
     updateTerminalStatus(status);
-    if (!status.connected) {
+    if (config.transport === "ws-lan" && !status.connected) {
       setPairingModalOpen(true);
     }
   };
@@ -2996,7 +3025,7 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
               <div className="terminal-status-card__main">
                 <div className="terminal-status-card__header">
                   <span className="terminal-status-card__badge">{terminalStep === "ready" ? "Ready" : terminalStep === "pair" ? "Pair" : terminalStep === "checking" ? "Checking" : "Connect"}</span>
-                  <strong>{isRealCloverLan ? "Clover Mini 3 LAN" : terminalTransport === "rest-local" ? "Mock Clover REST" : "Mock terminal"}</strong>
+                  <strong>{terminalDisplayName}</strong>
                 </div>
                 <span>{terminalStatus?.message ?? "Checking payment terminal..."}</span>
                 {terminalStatus?.pairingCode && <div className="terminal-inline-code">Enter on Clover: {terminalStatus.pairingCode}</div>}
@@ -3010,8 +3039,11 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
                       <li className={terminalStatus?.connected ? "terminal-process-list__step--done" : ""}>Wait for “Ready”, then run card payment.</li>
                     </ol>
                     <span>Endpoint: {terminalEndpoint}</span>
+                    {terminalConfig?.merchantId && <span>Merchant: {terminalConfig.merchantId}</span>}
+                    {terminalConfig?.appId && <span>App ID: {terminalConfig.appId}</span>}
                     {terminalConfig?.remoteApplicationId && <span>App: {terminalConfig.remoteApplicationId}</span>}
                     {terminalConfig?.serialNumber && <span>Device: {terminalConfig.serialNumber}</span>}
+                    {terminalConfig?.deviceId && <span>Device ID: {terminalConfig.deviceId}</span>}
                   </div>
                 </details>
               </div>
@@ -3019,8 +3051,12 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
                 <button type="button" onClick={openTerminalConfig} disabled={terminalStatusLoading}>
                   Configure
                 </button>
-                <button type="button" onClick={() => { void beginTerminalPairing(); }} disabled={terminalStatusLoading || terminalTransport === "mock"}>
-                  Connect / Pair
+                <button
+                  type="button"
+                  onClick={() => { isCloverCloudRest ? void refreshTerminalStatus() : void beginTerminalPairing(); }}
+                  disabled={terminalStatusLoading || terminalTransport === "mock"}
+                >
+                  {isCloverCloudRest ? "Check Connection" : "Connect / Pair"}
                 </button>
                 <button type="button" onClick={() => { void refreshTerminalStatus(); }} disabled={terminalStatusLoading}>
                   {terminalStatusLoading ? "..." : "Refresh"}
@@ -3057,17 +3093,19 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
             </div>
 
             {/* Exact payment button */}
-            {activeMethod === "card" && terminalConfig?.transport === "ws-lan" && !terminalStatus?.connected && (
+            {activeMethod === "card" && (terminalConfig?.transport === "ws-lan" || terminalConfig?.transport === "rest-cloud") && !terminalStatus?.connected && (
               <div className="card-payment-readiness">
                 <strong>Clover is not ready</strong>
-                <span>You can still press Send to call the Clover WebSocket adapter, but Clover may reject it until the Mini reports Ready.</span>
-                <button type="button" onClick={() => { void beginTerminalPairing(); }} disabled={terminalStatusLoading}>Connect Clover</button>
+                <span>You can still press Send to call the Clover adapter, but Clover may reject it until the terminal reports Ready.</span>
+                <button type="button" onClick={() => { isCloverCloudRest ? void refreshTerminalStatus() : void beginTerminalPairing(); }} disabled={terminalStatusLoading}>
+                  {isCloverCloudRest ? "Check Clover" : "Connect Clover"}
+                </button>
               </div>
             )}
             <div className="payment-action-stack">
               {remaining > 0 && (
                 <Button fullWidth variant="secondary" onClick={exactPayment} loading={loading} size="lg" className="payment-touch-button">
-                  {activeMethod === "card" && terminalConfig?.transport === "ws-lan" ? "Send Exact to Clover" : "Pay Exact"}
+                  {activeMethod === "card" && (terminalConfig?.transport === "ws-lan" || terminalConfig?.transport === "rest-cloud") ? "Send Exact to Clover" : "Pay Exact"}
                   <span className="payment-touch-button__amount">{formatMoney(remaining)}</span>
                 </Button>
               )}
@@ -3110,7 +3148,7 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
         <>
           <Button variant="secondary" size="lg" onClick={() => setPaymentAmountModalOpen(false)}>Cancel</Button>
           <Button size="lg" onClick={() => { void addPayment(); }} loading={loading} disabled={amountCents <= 0 || remaining <= 0}>
-            {activeMethod === "card" && terminalConfig?.transport === "ws-lan" ? "Send to Clover" : `Add ${methodLabel(activeMethod)}`}
+            {activeMethod === "card" && (terminalConfig?.transport === "ws-lan" || terminalConfig?.transport === "rest-cloud") ? "Send to Clover" : `Add ${methodLabel(activeMethod)}`}
           </Button>
         </>
       }
@@ -3150,7 +3188,7 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
     >
       <div className="terminal-config-form">
         <p className="text-muted text-sm" style={{ marginTop: 0 }}>
-          Configure the payment terminal used by this Checkout tab. Save & Connect applies the config on the local API, then starts the Clover LAN connection. Tokens are kept on the local API and are never shown in full.
+          Configure the payment terminal used by this Checkout tab. Save & Connect applies the config on the local API. Tokens and secrets are kept on the local API and are never shown in full.
         </p>
         <Select
           label="Terminal Mode"
@@ -3159,9 +3197,25 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
           options={[
             { value: "mock", label: "Built-in mock terminal" },
             { value: "ws-lan", label: "Real Clover LAN WebSocket" },
+            { value: "rest-cloud", label: "Clover Cloud REST Pay Display" },
             { value: "rest-local", label: "Mock Clover / REST-local" },
           ]}
         />
+        {terminalConfigForm.transport === "rest-cloud" && (
+          <>
+            <div className="clover-process-panel clover-process-panel--compact">
+              <div><strong>Cloud REST process:</strong> enter the Clover cloud endpoint, merchant/app details, device ID, POS ID, and access token. OAuth token setup is manual for this version.</div>
+            </div>
+            <Input label="Clover Cloud Base URL" value={terminalConfigForm.cloudBaseUrl} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, cloudBaseUrl: event.target.value }))} placeholder="https://sandbox.dev.clover.com/connect" />
+            <Input label="Merchant ID" value={terminalConfigForm.merchantId} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, merchantId: event.target.value }))} placeholder="13-character Clover ID" />
+            <Input label="App ID" value={terminalConfigForm.appId} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, appId: event.target.value }))} placeholder="Clover app ID" />
+            <Input label={`App Secret${terminalConfig?.appSecretPreview ? ` (${terminalConfig.appSecretPreview})` : ""}`} value={terminalConfigForm.appSecret} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, appSecret: event.target.value }))} placeholder="Leave blank to keep existing secret" />
+            <Input label={`Access Token${terminalConfig?.accessTokenPreview ? ` (${terminalConfig.accessTokenPreview})` : ""}`} value={terminalConfigForm.accessToken} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, accessToken: event.target.value }))} placeholder="Leave blank to keep existing token" />
+            <Input label="Device ID" value={terminalConfigForm.deviceId} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, deviceId: event.target.value }))} placeholder="Clover device ID" />
+            <Input label="POS ID" value={terminalConfigForm.posId} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, posId: event.target.value }))} placeholder="owner-pos" />
+            <Input label="Remote App ID" value={terminalConfigForm.remoteApplicationId} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, remoteApplicationId: event.target.value }))} placeholder="developerId.appId" />
+          </>
+        )}
         {terminalConfigForm.transport === "ws-lan" && (
           <>
             <div className="clover-process-panel clover-process-panel--compact">

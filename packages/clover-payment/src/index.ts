@@ -6,7 +6,7 @@ import { config as loadEnv } from "dotenv";
 const require = createRequire(import.meta.url);
 loadEnv({ path: fileURLToPath(new URL("../../../.env", import.meta.url)) });
 
-export type CloverTransport = "mock" | "rest-local" | "usb-sidecar" | "ws-lan";
+export type CloverTransport = "mock" | "rest-local" | "rest-cloud" | "usb-sidecar" | "ws-lan";
 
 export type CloverPaymentStatus = "approved" | "declined" | "cancelled" | "failed";
 
@@ -91,6 +91,10 @@ export interface CloverPaymentAdapter {
 
 export type CloverPaymentConfig = {
   transport: CloverTransport;
+  cloudBaseUrl?: string;
+  merchantId?: string;
+  appId?: string;
+  appSecret?: string;
   deviceBaseUrl?: string;
   deviceId?: string;
   posId?: string;
@@ -175,6 +179,10 @@ type NormalizedProviderPayment = {
 export function loadCloverPaymentConfig(env: CloverPaymentEnv = readProcessEnv()): CloverPaymentConfig {
   return {
     transport: parseTransport(env.CLOVER_TRANSPORT),
+    cloudBaseUrl: trimOptional(env.CLOVER_CLOUD_BASE_URL),
+    merchantId: trimOptional(env.CLOVER_MERCHANT_ID),
+    appId: trimOptional(env.CLOVER_APP_ID),
+    appSecret: trimOptional(env.CLOVER_APP_SECRET),
     deviceBaseUrl: trimOptional(env.CLOVER_DEVICE_BASE_URL),
     deviceId: trimOptional(env.CLOVER_DEVICE_ID),
     posId: trimOptional(env.CLOVER_POS_ID),
@@ -203,6 +211,16 @@ export function validateCloverPaymentConfig(config: CloverPaymentConfig): string
     requireConfig(errors, config.accessToken, "CLOVER_ACCESS_TOKEN is required for rest-local transport");
   }
 
+  if (config.transport === "rest-cloud") {
+    requireConfig(errors, config.cloudBaseUrl, "CLOVER_CLOUD_BASE_URL is required for rest-cloud transport");
+    requireConfig(errors, config.merchantId, "CLOVER_MERCHANT_ID is required for rest-cloud transport");
+    requireConfig(errors, config.appId, "CLOVER_APP_ID is required for rest-cloud transport");
+    requireConfig(errors, config.appSecret, "CLOVER_APP_SECRET is required for rest-cloud transport");
+    requireConfig(errors, config.deviceId, "CLOVER_DEVICE_ID is required for rest-cloud transport");
+    requireConfig(errors, config.posId, "CLOVER_POS_ID is required for rest-cloud transport");
+    requireConfig(errors, config.accessToken, "CLOVER_ACCESS_TOKEN is required for rest-cloud transport");
+  }
+
   if (config.transport === "usb-sidecar") {
     requireConfig(errors, config.usbSidecarUrl, "CLOVER_USB_SIDECAR_URL is required for usb-sidecar transport");
   }
@@ -228,6 +246,10 @@ export function createCloverPaymentAdapter(
 
   if (config.transport === "rest-local") {
     return new RestPayDisplayAdapter(config, options);
+  }
+
+  if (config.transport === "rest-cloud") {
+    return new CloverCloudPayDisplayAdapter(config, options);
   }
 
   if (config.transport === "usb-sidecar") {
@@ -743,6 +765,114 @@ export class RestPayDisplayAdapter implements CloverPaymentAdapter {
   }
 }
 
+export class CloverCloudPayDisplayAdapter implements CloverPaymentAdapter {
+  private readonly http: CloverHttpClient;
+  private readonly baseUrl: string;
+
+  constructor(private readonly config: CloverPaymentConfig, options: CloverHttpAdapterOptions = {}) {
+    this.http = options.fetch ?? fetch;
+    this.baseUrl = normalizeBaseUrl(requireConfigValue(config.cloudBaseUrl, "cloudBaseUrl"));
+  }
+
+  async verifyConnection(): Promise<CloverConnectionStatus> {
+    try {
+      await this.postJson("/v1/device/welcome", {});
+      return {
+        connected: true,
+        provider: "clover",
+        transport: "rest-cloud",
+        deviceId: this.config.deviceId,
+        message: "Clover Cloud REST Pay Display endpoint responded",
+      };
+    } catch (error) {
+      return {
+        connected: false,
+        provider: "clover",
+        transport: "rest-cloud",
+        deviceId: this.config.deviceId,
+        message: error instanceof Error ? error.message : "Clover Cloud REST Pay Display endpoint unavailable",
+      };
+    }
+  }
+
+  async startCardSale(input: CloverCardSaleRequest): Promise<CloverCardSaleResult> {
+    const baseAmountCents = requirePositiveInteger(input.amountCents, "amountCents");
+    requireNonEmptyString(input.idempotencyKey, "idempotencyKey");
+    const externalPaymentId = input.externalPaymentId ?? input.idempotencyKey;
+    const tipFlow = resolveTipFlow(input);
+    const tipCents = tipFlow === "pre_payment_device" ? await this.readTip(baseAmountCents) : 0;
+    const totalAmountCents = baseAmountCents + tipCents;
+
+    const body = await this.postJson(
+      "/v1/payments",
+      {
+        amount: totalAmountCents,
+        externalPaymentId,
+        saleId: input.saleId,
+      },
+      { idempotencyKey: input.idempotencyKey }
+    );
+    return normalizePaymentResult(baseAmountCents, body, tipCents);
+  }
+
+  async cancelCurrentPayment(): Promise<void> {
+    await this.postJson("/v1/device/cancel", {});
+  }
+
+  async refund(input: CloverRefundRequest): Promise<CloverRefundResult> {
+    requireNonEmptyString(input.providerPaymentId, "providerPaymentId");
+    requirePositiveInteger(input.amountCents, "amountCents");
+    const body = await this.postJson(`/v1/payments/${encodeURIComponent(input.providerPaymentId)}/refund`, {
+      amount: input.amountCents,
+      reason: input.reason,
+    });
+    return normalizeRefundResult(body);
+  }
+
+  async reconcile(input: CloverReconciliationRequest): Promise<CloverReconciliationResult> {
+    const body = await this.postJson("/v1/payments/search", {
+      start: input.start.toISOString(),
+      end: input.end.toISOString(),
+      externalPaymentId: input.externalPaymentId,
+    });
+    return normalizeReconciliationResult("rest-cloud", body);
+  }
+
+  private async readTip(baseAmountCents: number): Promise<number> {
+    const body = await this.postJson("/v1/device/read-tip", { baseAmount: baseAmountCents });
+    return requireNonNegativeInteger(readInteger(asRecord(body).tipAmount, readInteger(asRecord(body).tipCents, 0)), "tipAmount");
+  }
+
+  private async postJson(path: string, body: unknown, options: { idempotencyKey?: string } = {}): Promise<unknown> {
+    return this.requestJson(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }, options);
+  }
+
+  private async requestJson(path: string, init: RequestInit, options: { idempotencyKey?: string } = {}): Promise<unknown> {
+    const headers = new Headers(init.headers);
+    headers.set("Accept", "application/json");
+    headers.set("Authorization", `Bearer ${requireConfigValue(this.config.accessToken, "accessToken")}`);
+    headers.set("X-Clover-Merchant-Id", requireConfigValue(this.config.merchantId, "merchantId"));
+    headers.set("X-Clover-App-Id", requireConfigValue(this.config.appId, "appId"));
+    headers.set("X-Clover-Device-Id", requireConfigValue(this.config.deviceId, "deviceId"));
+    headers.set("X-POS-ID", requireConfigValue(this.config.posId, "posId"));
+    if (this.config.remoteApplicationId) {
+      headers.set("X-Clover-Remote-App-Id", this.config.remoteApplicationId);
+    }
+    if (options.idempotencyKey) {
+      headers.set("Idempotency-Key", options.idempotencyKey);
+    }
+    const response = await this.http(`${this.baseUrl}${path}`, { ...init, headers });
+    if (!response.ok) {
+      throw new Error(`Clover Cloud REST Pay Display request failed: ${response.status} ${response.statusText}`);
+    }
+    return response.json();
+  }
+}
+
 export class UsbSidecarAdapter implements CloverPaymentAdapter {
   private readonly http: CloverHttpClient;
   private readonly baseUrl: string;
@@ -817,7 +947,7 @@ export class UsbSidecarAdapter implements CloverPaymentAdapter {
 
 function parseTransport(value: string | undefined): CloverTransport {
   const normalized = trimOptional(value) ?? "mock";
-  if (normalized === "mock" || normalized === "rest-local" || normalized === "usb-sidecar" || normalized === "ws-lan") {
+  if (normalized === "mock" || normalized === "rest-local" || normalized === "rest-cloud" || normalized === "usb-sidecar" || normalized === "ws-lan") {
     return normalized;
   }
   throw new Error(`Unsupported CLOVER_TRANSPORT: ${normalized}`);

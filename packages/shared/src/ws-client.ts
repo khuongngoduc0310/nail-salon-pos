@@ -1,5 +1,9 @@
-const API_HOST = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_BASE_URL) || "http://localhost:4000/api";
+const API_HOST = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_BASE_URL) || getDefaultApiBaseUrl();
 const WS_URL = API_HOST.replace("/api", "").replace("http://", "ws://").replace("https://", "wss://") + "/ws";
+
+function getDefaultApiBaseUrl(): string {
+  return `http://${window.location.hostname}:4000/api`;
+}
 
 // Simple hook for React apps
 export function createWsConnection(onMessage: (type: string, data: any) => void) {

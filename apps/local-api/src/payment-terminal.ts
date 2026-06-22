@@ -18,10 +18,12 @@ import {
   type TerminalSaleRequest,
 } from "@nail/payment-terminal";
 
-export type SafeTerminalConfig = Omit<CloverPaymentConfig, "accessToken" | "authToken"> & {
+export type SafeTerminalConfig = Omit<CloverPaymentConfig, "accessToken" | "appSecret" | "authToken"> & {
   accessTokenConfigured?: boolean;
+  appSecretConfigured?: boolean;
   authTokenConfigured?: boolean;
   accessTokenPreview?: string;
+  appSecretPreview?: string;
   authTokenPreview?: string;
 };
 
@@ -188,6 +190,10 @@ function normalizeTerminalConfig(config: CloverPaymentConfig): CloverPaymentConf
   const normalized: CloverPaymentConfig = {
     ...config,
     transport,
+    cloudBaseUrl: trimString(config.cloudBaseUrl),
+    merchantId: trimString(config.merchantId),
+    appId: trimString(config.appId),
+    appSecret: trimString(config.appSecret),
     deviceBaseUrl: trimString(config.deviceBaseUrl),
     deviceId: trimString(config.deviceId),
     posId: trimString(config.posId),
@@ -226,12 +232,14 @@ function normalizeWsPath(value: string | undefined): string | undefined {
 }
 
 function toSafeTerminalConfig(config: CloverPaymentConfig): SafeTerminalConfig {
-  const { accessToken, authToken, ...safeConfig } = config;
+  const { accessToken, appSecret, authToken, ...safeConfig } = config;
   return {
     ...safeConfig,
     accessTokenConfigured: Boolean(accessToken),
+    appSecretConfigured: Boolean(appSecret),
     authTokenConfigured: Boolean(authToken),
     accessTokenPreview: maskSecret(accessToken),
+    appSecretPreview: maskSecret(appSecret),
     authTokenPreview: maskSecret(authToken),
   };
 }
@@ -248,8 +256,8 @@ function trimString(value: string | undefined): string | undefined {
 }
 
 export function parseTerminalTransport(value: unknown): CloverTransport {
-  if (value === "mock" || value === "rest-local" || value === "usb-sidecar" || value === "ws-lan") {
+  if (value === "mock" || value === "rest-local" || value === "rest-cloud" || value === "usb-sidecar" || value === "ws-lan") {
     return value;
   }
-  throw new Error("transport must be mock, rest-local, usb-sidecar, or ws-lan");
+  throw new Error("transport must be mock, rest-local, rest-cloud, usb-sidecar, or ws-lan");
 }

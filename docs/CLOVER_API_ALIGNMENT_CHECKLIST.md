@@ -19,6 +19,14 @@ Use this checklist before wiring `@nail/clover-payment` into `apps/local-api` ch
 - [ ] Configure the device URL/port, normally `https://<device-ip>:12346/connect`.
 - [ ] Send required headers: `Authorization`, `X-Clover-Device-Id`, and `X-POS-ID`.
 
+## Cloud REST Pay Display connection
+
+- [ ] Configure `CLOVER_TRANSPORT=rest-cloud`.
+- [ ] Configure `CLOVER_CLOUD_BASE_URL`, `CLOVER_MERCHANT_ID`, `CLOVER_APP_ID`, `CLOVER_APP_SECRET`, `CLOVER_ACCESS_TOKEN`, `CLOVER_DEVICE_ID`, and `CLOVER_POS_ID`.
+- [ ] Keep OAuth/install token exchange manual for this version; do not store Clover app secrets or access tokens in frontend code.
+- [ ] Send required cloud context headers: `Authorization`, `X-Clover-Merchant-Id`, `X-Clover-App-Id`, `X-Clover-Device-Id`, and `X-POS-ID`.
+- [ ] Do not send the Clover app secret to payment endpoints unless Clover's API explicitly requires it.
+
 ## API shape alignment
 
 - [ ] Send sales to `/v1/payments` with Clover field names: `amount` and `externalPaymentId`.

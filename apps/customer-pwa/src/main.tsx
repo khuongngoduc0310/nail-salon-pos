@@ -2,7 +2,11 @@ import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
-const API_BASE = import.meta.env?.VITE_API_BASE_URL ?? "http://localhost:4000/api";
+const API_BASE = import.meta.env?.VITE_API_BASE_URL ?? getDefaultApiBaseUrl();
+
+function getDefaultApiBaseUrl(): string {
+  return `http://${window.location.hostname}:4000/api`;
+}
 
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(`${API_BASE}${path}`);
