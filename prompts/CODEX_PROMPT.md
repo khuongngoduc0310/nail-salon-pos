@@ -8,11 +8,9 @@ You are building a local-first nail salon POS system. Read all files in this rep
 Source of truth:
 - docs/PRODUCT_REQUIREMENTS.md
 - docs/ARCHITECTURE.md
-- docs/IMPLEMENTATION_PLAN.md
 - db/SCHEMA.sql
 - api/API_SPEC.md
 - workflows/*.md
-- tests/TEST_PLAN.md
 
 Important requirements:
 - Single-store nail salon.

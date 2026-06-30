@@ -67,4 +67,4 @@ Use this checklist before wiring `@nail/clover-payment` into `apps/local-api` ch
 - [ ] Run `corepack pnpm --filter @nail/clover-payment test`.
 - [ ] Run `corepack pnpm --filter @nail/payment-terminal typecheck` after adding the wrapper.
 - [ ] Run `corepack pnpm --filter @nail/local-api typecheck` after local API integration.
-- [ ] Run Clover sandbox/device tests from `tests/CLOVER_PAYMENT_TEST_PLAN.md`.
+- [ ] Run Clover sandbox/device tests for the configured Clover payment flows.

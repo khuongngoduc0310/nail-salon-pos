@@ -233,7 +233,7 @@ Key Clover docs:
 Start by giving Codex this instruction:
 
 ```text
-Read this repository. Treat docs/PRODUCT_REQUIREMENTS.md, docs/ARCHITECTURE.md, db/SCHEMA.sql, api/API_SPEC.md, workflows/*.md, and tests/TEST_PLAN.md as source-of-truth. Build the system incrementally. Start with the local backend, database schema, owner POS web app, and worker/customer PWA shells. Do not implement Clover live payments until the mock payment adapter and test flows pass.
+Read this repository. Treat docs/PRODUCT_REQUIREMENTS.md, docs/ARCHITECTURE.md, db/SCHEMA.sql, api/API_SPEC.md, and workflows/*.md as source-of-truth. Build the system incrementally. Start with the local backend, database schema, owner POS web app, and worker/customer PWA shells. Do not implement Clover live payments until the mock payment adapter and test flows pass.
 ```
 
 ## Suggested implementation order

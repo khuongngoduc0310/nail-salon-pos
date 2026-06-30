@@ -21,11 +21,9 @@ Read these before making product or architecture changes:
 
 - `docs/PRODUCT_REQUIREMENTS.md`
 - `docs/ARCHITECTURE.md`
-- `docs/IMPLEMENTATION_PLAN.md`
 - `db/SCHEMA.sql`
 - `api/API_SPEC.md`
 - `workflows/*.md`
-- `tests/TEST_PLAN.md`
 - `prompts/CODEX_RULES.md`
 
 If implementation and docs conflict, surface the mismatch and make the smallest defensible change. Do not silently redefine business rules.
