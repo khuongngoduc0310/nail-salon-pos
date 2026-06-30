@@ -6,7 +6,7 @@ Clover Mini is the card terminal. The salon POS is the system of record for serv
 
 ## Recommended integration
 
-Use the local API as the only Clover integration point. Production card-present payments can use either Clover Cloud REST Pay Display (`rest-cloud`) with manually configured merchant/app/token/device values, or Clover's official `remote-pay-cloud` npm SDK (`ws-lan`) to connect to Secure Network Pay Display over the store LAN WebSocket connection. This keeps Owner POS behind the local API and avoids direct browser-to-Clover payment handling. REST-local remains a fallback/test transport.
+Use the local API as the only Clover integration point. Production card-present payments should use Clover's official `remote-pay-cloud` npm SDK through Cloud Pay Display (`ws-cloud`) with manually configured merchant/app/token/device values. LAN Secure Network Pay Display (`ws-lan`) and Cloud REST Pay Display (`rest-cloud`) remain fallback options. This keeps Owner POS behind the local API and avoids direct browser-to-Clover payment handling. REST-local remains a fallback/test transport.
 
 Useful docs:
 
@@ -17,11 +17,11 @@ Useful docs:
 
 ## Development strategy
 
-Implement `PaymentTerminalAdapter` first with a mock adapter. Cloud REST card-present payments use `@nail/clover-payment` with `CLOVER_TRANSPORT=rest-cloud`, `CLOVER_CLOUD_BASE_URL`, `CLOVER_MERCHANT_ID`, `CLOVER_APP_ID`, `CLOVER_APP_SECRET`, `CLOVER_ACCESS_TOKEN`, `CLOVER_DEVICE_ID`, and `CLOVER_POS_ID`. LAN card-present payments use `CLOVER_TRANSPORT=ws-lan`, `CLOVER_REMOTE_APP_ID`, either `CLOVER_WS_URL=wss://<clover-lan-address>:12345/remote_pay` or separate `CLOVER_WS_HOST`, `CLOVER_WS_PORT`, and `CLOVER_WS_PATH`, `CLOVER_POS_NAME`, `CLOVER_SERIAL_NUMBER`, and the first-pairing `CLOVER_AUTH_TOKEN` once available. The Clover Developer Dashboard app should select only the modules/permissions needed for card-present payments, refunds, and payment lookup/reconciliation; Clover modules are not assigned by POS runtime code.
+Implement `PaymentTerminalAdapter` first with a mock adapter. Remote Pay Cloud card-present payments use `@nail/clover-payment` with `CLOVER_TRANSPORT=ws-cloud`, `CLOVER_REMOTE_APP_ID`, `CLOVER_DEVICE_ID`, `CLOVER_MERCHANT_ID`, `CLOVER_ACCESS_TOKEN`, `CLOVER_CLOUD_SERVER`, and `CLOVER_FRIENDLY_ID`. Cloud REST card-present fallback uses `CLOVER_TRANSPORT=rest-cloud`, `CLOVER_CLOUD_BASE_URL`, `CLOVER_ACCESS_TOKEN`, `CLOVER_DEVICE_ID`, and `CLOVER_POS_ID`; `CLOVER_MERCHANT_ID`, `CLOVER_APP_ID`, and `CLOVER_REMOTE_APP_ID` can be supplied as optional configured context. LAN card-present payments use `CLOVER_TRANSPORT=ws-lan`, `CLOVER_REMOTE_APP_ID`, either `CLOVER_WS_URL=wss://<clover-lan-address>:12345/remote_pay` or separate `CLOVER_WS_HOST`, `CLOVER_WS_PORT`, and `CLOVER_WS_PATH`, `CLOVER_POS_NAME`, `CLOVER_SERIAL_NUMBER`, and the first-pairing `CLOVER_AUTH_TOKEN` once available. The Clover Developer Dashboard app should select only the modules/permissions needed for card-present payments, refunds, and payment lookup/reconciliation; Clover modules are not assigned by POS runtime code.
 
 For local end-to-end development, run `apps/mock-clover-device`. It exposes Clover-shaped REST Pay Display endpoints under `/connect` so checkout can exercise the same `rest-local` adapter path used for a real Clover Mini.
 
-Owner POS Checkout also includes a Clover connection settings panel. The owner can choose mock, Cloud REST Pay Display, REST-local/mock Clover, or real Clover LAN WebSocket, enter required connection details, save/apply, then pay without restarting the local API. OAuth/install token exchange is not part of the first Cloud REST version; credentials are manually provisioned.
+Owner POS Checkout also includes a Clover connection settings panel. The owner can choose mock, Remote Pay Cloud, Cloud REST Pay Display, REST-local/mock Clover, or real Clover LAN WebSocket, enter required connection details, save/apply, then pay without restarting the local API. OAuth/install token exchange is not part of the first Cloud/REST versions; credentials are manually provisioned.
 
 ## Sale flow
 

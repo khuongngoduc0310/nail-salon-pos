@@ -24,10 +24,11 @@ Required passing cases:
 - Reconciliation preserves safe Clover order/ticket references when available so a POS sale/ticket can also be matched to a Clover payment.
 - Config defaults to `mock`.
 - `rest-local` config rejects missing `CLOVER_DEVICE_BASE_URL`, `CLOVER_DEVICE_ID`, `CLOVER_POS_ID`, and `CLOVER_ACCESS_TOKEN`.
-- `rest-cloud` config rejects missing `CLOVER_CLOUD_BASE_URL`, `CLOVER_MERCHANT_ID`, `CLOVER_APP_ID`, `CLOVER_APP_SECRET`, `CLOVER_DEVICE_ID`, `CLOVER_POS_ID`, and `CLOVER_ACCESS_TOKEN`.
+- `rest-cloud` config rejects missing `CLOVER_CLOUD_BASE_URL`, `CLOVER_DEVICE_ID`, `CLOVER_POS_ID`, and `CLOVER_ACCESS_TOKEN`; merchant/app IDs are optional context.
 - `usb-sidecar` config rejects missing `CLOVER_USB_SIDECAR_URL`.
+- `ws-cloud` config rejects missing `CLOVER_REMOTE_APP_ID`, `CLOVER_DEVICE_ID`, `CLOVER_MERCHANT_ID`, `CLOVER_ACCESS_TOKEN`, and `CLOVER_CLOUD_SERVER`.
 - REST adapter sends Clover REST Pay Display requests to `/connect/v1/payments` with Clover field names `amount` and `externalPaymentId`, plus required `Authorization`, `X-Clover-Device-Id`, and `X-POS-ID` headers.
-- Cloud REST adapter sends Clover REST Pay Display requests to the configured cloud base URL with Clover field names `amount` and `externalPaymentId`, plus required `Authorization`, `X-Clover-Merchant-Id`, `X-Clover-App-Id`, `X-Clover-Device-Id`, and `X-POS-ID` headers.
+- Cloud REST adapter sends Clover REST Pay Display requests to the configured cloud base URL with Clover field names `amount` and `externalPaymentId`, plus required `Authorization`, `User-Agent`, `X-Clover-Device-Id`, and `X-POS-ID` headers; merchant/app ID headers are sent only when configured.
 - REST and USB adapters normalize provider responses to the same POS-safe result shape.
 - Returned tips can be allocated by the POS either evenly by worker or by discounted service amount percentage before checkout completion.
 - Raw provider metadata strips sensitive fields recursively and case-insensitively, including variants such as `cardNumber`, `card_number`, `cvv`, `pin`, `magstripe`, `track1`, `track2`, `track3`, `emv`, `rawEmv`, `emvData`, and `pan`.
@@ -124,6 +125,28 @@ Validate:
 - Declined/cancelled/failed responses normalize to package statuses and do not report charged totals.
 - HTTP 4xx/5xx returns an actionable error.
 
+## Remote Pay Cloud SDK Simulation Tests
+
+Use a fake `remote-pay-cloud` SDK or a Clover device with Cloud Pay Display installed, open, and started.
+
+Set:
+
+```powershell
+$env:CLOVER_TRANSPORT="ws-cloud"
+$env:CLOVER_REMOTE_APP_ID="<remote-app-id>"
+$env:CLOVER_DEVICE_ID="<device-id>"
+$env:CLOVER_MERCHANT_ID="<merchant-id>"
+$env:CLOVER_ACCESS_TOKEN="<merchant-access-token>"
+$env:CLOVER_CLOUD_SERVER="https://api.clover.com"
+$env:CLOVER_FRIENDLY_ID="owner-pos-1"
+```
+
+Validate:
+
+- `status` initializes the Remote Pay Cloud SDK configuration builder and reports ready when the device is ready.
+- `test-sale 100` sends a Remote Pay SDK `SaleRequest` using the POS idempotency key as external ID.
+- No token or sensitive card data is logged or returned to Owner POS.
+
 ## Cloud REST Pay Display Simulation Tests
 
 Use a local HTTP stub representing Clover Cloud REST Pay Display, or a Clover sandbox endpoint when credentials are available.
@@ -133,12 +156,11 @@ Set:
 ```powershell
 $env:CLOVER_TRANSPORT="rest-cloud"
 $env:CLOVER_CLOUD_BASE_URL="https://<clover-cloud-rest-base>"
-$env:CLOVER_MERCHANT_ID="<merchant-id>"
-$env:CLOVER_APP_ID="<app-id>"
-$env:CLOVER_APP_SECRET="<app-secret>"
 $env:CLOVER_ACCESS_TOKEN="<merchant-access-token>"
 $env:CLOVER_DEVICE_ID="<device-id>"
 $env:CLOVER_POS_ID="owner-pos-test"
+$env:CLOVER_MERCHANT_ID="<merchant-id>"        # optional context
+$env:CLOVER_APP_ID="<app-id>"                  # optional context
 $env:CLOVER_REMOTE_APP_ID="<developer-id>.<app-id>"
 ```
 
@@ -146,7 +168,7 @@ Validate:
 
 - `status` reaches the configured cloud base URL and returns normalized connection state.
 - `test-sale 100` maps the POS amount to Clover `amount` and maps the POS idempotency key to Clover `externalPaymentId`.
-- Required request headers include `Authorization`, `X-Clover-Merchant-Id`, `X-Clover-App-Id`, `X-Clover-Device-Id`, and `X-POS-ID`.
+- Required request headers include `Authorization`, `User-Agent`, `X-Clover-Device-Id`, and `X-POS-ID`; optional merchant/app ID headers appear only when configured.
 - The app secret is not sent to payment endpoints.
 - Approved response with tip returns correct `baseAmountCents`, `tipCents`, and `totalChargedCents`.
 - Declined/cancelled/failed responses normalize to package statuses and do not report charged totals.

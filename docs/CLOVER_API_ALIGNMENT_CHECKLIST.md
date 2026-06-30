@@ -19,12 +19,21 @@ Use this checklist before wiring `@nail/clover-payment` into `apps/local-api` ch
 - [ ] Configure the device URL/port, normally `https://<device-ip>:12346/connect`.
 - [ ] Send required headers: `Authorization`, `X-Clover-Device-Id`, and `X-POS-ID`.
 
+## Remote Pay Cloud SDK connection
+
+- [ ] Configure `CLOVER_TRANSPORT=ws-cloud`.
+- [ ] Confirm Cloud Pay Display is installed, open, and started on the Clover Mini/Flex.
+- [ ] Configure `CLOVER_REMOTE_APP_ID`, `CLOVER_DEVICE_ID`, `CLOVER_MERCHANT_ID`, `CLOVER_ACCESS_TOKEN`, `CLOVER_CLOUD_SERVER`, and `CLOVER_FRIENDLY_ID`.
+- [ ] Use `https://api.clover.com` as the production Clover server; let the SDK build/manage the websocket connection.
+- [ ] Do not call Clover directly from Owner POS; the local API owns the SDK connector.
+
 ## Cloud REST Pay Display connection
 
 - [ ] Configure `CLOVER_TRANSPORT=rest-cloud`.
-- [ ] Configure `CLOVER_CLOUD_BASE_URL`, `CLOVER_MERCHANT_ID`, `CLOVER_APP_ID`, `CLOVER_APP_SECRET`, `CLOVER_ACCESS_TOKEN`, `CLOVER_DEVICE_ID`, and `CLOVER_POS_ID`.
-- [ ] Keep OAuth/install token exchange manual for this version; do not store Clover app secrets or access tokens in frontend code.
-- [ ] Send required cloud context headers: `Authorization`, `X-Clover-Merchant-Id`, `X-Clover-App-Id`, `X-Clover-Device-Id`, and `X-POS-ID`.
+- [ ] Confirm Cloud Pay Display is installed, open, and started on the Clover Mini/Flex for cloud connections.
+- [ ] Configure `CLOVER_CLOUD_BASE_URL`, `CLOVER_ACCESS_TOKEN`, `CLOVER_DEVICE_ID`, and `CLOVER_POS_ID`; optionally configure `CLOVER_MERCHANT_ID`, `CLOVER_APP_ID`, and `CLOVER_REMOTE_APP_ID` for context.
+- [ ] Keep OAuth/install token exchange manual for this version; do not store Clover access tokens in frontend code.
+- [ ] Send required cloud context headers: `Authorization`, `User-Agent`, `X-Clover-Device-Id`, and `X-POS-ID`; send merchant/app ID headers only when configured.
 - [ ] Do not send the Clover app secret to payment endpoints unless Clover's API explicitly requires it.
 
 ## API shape alignment

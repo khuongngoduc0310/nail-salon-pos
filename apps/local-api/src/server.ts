@@ -211,6 +211,8 @@ function parseTerminalConfigUpdate(value: unknown): TerminalConfigUpdate {
     const authToken = optionalString(body.authToken, "authToken");
     if (authToken) update.authToken = authToken;
   }
+  if (body.cloudServer !== undefined) update.cloudServer = optionalString(body.cloudServer, "cloudServer");
+  if (body.friendlyId !== undefined) update.friendlyId = optionalString(body.friendlyId, "friendlyId");
   return update;
 }
 

@@ -113,11 +113,13 @@ interface PaymentTerminalAdapter {
 
 Adapters:
 
-Additional real Clover transport: `CloverCloudPayDisplayAdapter` / `rest-cloud` supports Cloud REST Pay Display with manually configured merchant/app/token/device values.
+Additional real Clover transport: `CloverRemotePayLanAdapter` also supports Clover Remote Pay Cloud SDK through the `ws-cloud` transport with manually configured merchant/app/token/device values.
 
 1. `MockTerminalAdapter` — local dev/testing.
-2. `CloverRemotePayLanAdapter` / `ws-lan` transport — production path using Clover's official `remote-pay-cloud` npm SDK with Secure Network Pay Display over the store LAN WebSocket connection.
-3. `CloverRestPayDisplayAdapter` / `rest-local` transport — HTTP REST Pay Display fallback/local test path.
+2. `CloverRemotePayLanAdapter` / `ws-cloud` transport — production path using Clover's official `remote-pay-cloud` npm SDK with Cloud Pay Display through Clover servers.
+3. `CloverRemotePayLanAdapter` / `ws-lan` transport — production path using Clover's official `remote-pay-cloud` npm SDK with Secure Network Pay Display over the store LAN WebSocket connection.
+4. `CloverRestPayDisplayAdapter` / `rest-local` transport — HTTP REST Pay Display fallback/local test path.
+5. `CloverCloudPayDisplayAdapter` / `rest-cloud` transport — HTTP Cloud REST Pay Display fallback when approved REST credentials are available.
 
 For LAN WebSocket pairing, configure the local API with the Clover device endpoint, for example:
 
@@ -136,22 +138,36 @@ CLOVER_PAYMENT_TIMEOUT_MS=120000
 
 You can also use `CLOVER_WS_URL=wss://192.168.1.20:12345/remote_pay` instead of separate host/port/path fields. These values can be supplied at startup through environment variables or applied at runtime from the Owner POS Checkout tab's Clover connection settings panel. On first connection, `/api/terminal/pair/start` initializes the SDK connector and may return a pairing code. Enter that code on the Clover device. When Clover returns an auth token, keep it local/secret and reuse it as `CLOVER_AUTH_TOKEN`; never commit it. The local API owns the `remote-pay-cloud` WebSocket session; Owner POS only calls local API payment routes.
 
-For Clover Cloud REST Pay Display, configure the local API with manual Clover credentials and endpoint values:
+For Clover Remote Pay Cloud SDK, configure the local API with manual Clover credentials and endpoint values:
 
 ```text
-CLOVER_TRANSPORT=rest-cloud
-CLOVER_CLOUD_BASE_URL=https://<clover-cloud-rest-base>
-CLOVER_MERCHANT_ID=<merchant-id>
-CLOVER_APP_ID=<app-id>
-CLOVER_APP_SECRET=<app-secret>
-CLOVER_ACCESS_TOKEN=<merchant-access-token>
-CLOVER_DEVICE_ID=<clover-device-id>
-CLOVER_POS_ID=owner-pos
-CLOVER_REMOTE_APP_ID=<developer-id>.<app-id>
+CLOVER_TRANSPORT=ws-cloud
+CLOVER_REMOTE_APP_ID=RQ07XH5Z3EX44.BT1G67W0JJFVC
+CLOVER_DEVICE_ID=C035UT24950367
+CLOVER_MERCHANT_ID=HDSPNPKW4VXZ1
+CLOVER_ACCESS_TOKEN=<merchant-oauth-access-token>
+CLOVER_CLOUD_SERVER=https://api.clover.com
+CLOVER_FRIENDLY_ID=TL Nails And Spa 625
 CLOVER_PAYMENT_TIMEOUT_MS=120000
 ```
 
-The first Cloud REST version consumes already-provisioned credentials; it does not implement Clover OAuth/install token exchange. Secrets must remain in local environment/runtime configuration and are only returned to Owner POS as masked previews.
+The `remote-pay-cloud` SDK builds the websocket connection internally from the Clover server, merchant ID, device ID, and token. Do not call Clover directly from Owner POS.
+
+For Clover Cloud REST Pay Display fallback, configure the local API with manual Clover credentials and endpoint values:
+
+```text
+CLOVER_TRANSPORT=rest-cloud
+CLOVER_CLOUD_BASE_URL=https://api.clover.com/connect
+CLOVER_ACCESS_TOKEN=<merchant-oauth-access-token>
+CLOVER_DEVICE_ID=<clover-device-id>
+CLOVER_POS_ID=owner-pos
+CLOVER_MERCHANT_ID=<merchant-id>        # optional context
+CLOVER_APP_ID=<cloud-or-remote-app-id>  # optional context
+CLOVER_REMOTE_APP_ID=<remote-app-id>    # optional context
+CLOVER_PAYMENT_TIMEOUT_MS=120000
+```
+
+The first Cloud REST version consumes already-provisioned credentials; it does not implement Clover OAuth/install token exchange. Secrets must remain in local environment/runtime configuration and are only returned to Owner POS as masked previews. Owner POS can show connection status by asking the local API to call the Clover Cloud REST Pay Display device ping endpoint. The Clover Mini must have Cloud Pay Display installed, open, and started.
 
 ### Tip-on-terminal flow
 

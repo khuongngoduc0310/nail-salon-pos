@@ -563,7 +563,7 @@ export type TerminalStatus = {
 };
 
 export type TerminalConfig = {
-  transport: "mock" | "rest-local" | "rest-cloud" | "usb-sidecar" | "ws-lan";
+  transport: "mock" | "rest-local" | "rest-cloud" | "usb-sidecar" | "ws-lan" | "ws-cloud";
   cloudBaseUrl?: string;
   merchantId?: string;
   appId?: string;
@@ -586,6 +586,8 @@ export type TerminalConfig = {
   accessTokenPreview?: string;
   appSecretPreview?: string;
   authTokenPreview?: string;
+  cloudServer?: string;
+  friendlyId?: string;
 };
 
 export type TerminalConfigUpdate = Partial<TerminalConfig> & {

@@ -2089,18 +2089,20 @@ type TerminalConfigForm = {
   posName: string;
   serialNumber: string;
   authToken: string;
+  cloudServer: string;
+  friendlyId: string;
 };
 
 function defaultTerminalConfigForm(): TerminalConfigForm {
   return {
-    transport: "mock",
-    cloudBaseUrl: "",
-    merchantId: "",
-    appId: "",
+    transport: "ws-cloud",
+    cloudBaseUrl: "https://api.clover.com/connect",
+    merchantId: "HDSPNPKW4VXZ1",
+    appId: "P6N5P0HHFG3RE",
     appSecret: "",
     deviceBaseUrl: "http://localhost:4100",
-    deviceId: "mock-clover-mini-1",
-    posId: "owner-pos-dev",
+    deviceId: "C035UT24950367",
+    posId: "owner-pos",
     accessToken: "",
     wsHost: "192.168.0.18",
     wsPort: "12345",
@@ -2110,6 +2112,8 @@ function defaultTerminalConfigForm(): TerminalConfigForm {
     posName: "Nail Salon POS",
     serialNumber: "C035UT24950367",
     authToken: "",
+    cloudServer: "https://api.clover.com",
+    friendlyId: "TL Nails And Spa 625",
   };
 }
 
@@ -2130,6 +2134,8 @@ function formFromTerminalConfig(config: TerminalConfig): TerminalConfigForm {
     remoteApplicationId: config.remoteApplicationId ?? "",
     posName: config.posName ?? "Nail Salon POS",
     serialNumber: config.serialNumber ?? "owner-pos-1",
+    cloudServer: config.cloudServer ?? "https://api.clover.com",
+    friendlyId: config.friendlyId ?? "TL Nails And Spa 625",
   };
 }
 
@@ -2153,6 +2159,8 @@ function updateFromTerminalConfigForm(form: TerminalConfigForm) {
     posName: form.posName.trim() || undefined,
     serialNumber: form.serialNumber.trim() || undefined,
     authToken: form.authToken.trim() || undefined,
+    cloudServer: form.cloudServer.trim() || undefined,
+    friendlyId: form.friendlyId.trim() || undefined,
   };
 }
 
@@ -2165,7 +2173,7 @@ function readStoredTerminalConfigForm(): TerminalConfigForm | null {
     const raw = window.localStorage.getItem(TERMINAL_CONFIG_STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<StoredTerminalConfigForm>;
-    if (parsed.transport !== "mock" && parsed.transport !== "rest-local" && parsed.transport !== "rest-cloud" && parsed.transport !== "usb-sidecar" && parsed.transport !== "ws-lan") {
+    if (parsed.transport !== "mock" && parsed.transport !== "rest-local" && parsed.transport !== "rest-cloud" && parsed.transport !== "usb-sidecar" && parsed.transport !== "ws-lan" && parsed.transport !== "ws-cloud") {
       return null;
     }
     return {
@@ -2272,22 +2280,27 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
   const terminalTransport = terminalConfig?.transport ?? terminalConfigForm.transport;
   const isRealCloverLan = terminalTransport === "ws-lan";
   const isCloverCloudRest = terminalTransport === "rest-cloud";
-  const isRealCloverTransport = isRealCloverLan || isCloverCloudRest;
-  const terminalEndpoint = isCloverCloudRest
-    ? terminalConfig?.cloudBaseUrl ?? "Not configured"
-    : terminalTransport === "rest-local"
-      ? terminalConfig?.deviceBaseUrl ?? "Not configured"
-      : terminalConfig?.wsUrl
-        ?? (terminalConfig?.wsHost
-          ? `${terminalConfig.wsSecure === false ? "ws" : "wss"}://${terminalConfig.wsHost}${terminalConfig.wsPort ? `:${terminalConfig.wsPort}` : ""}${terminalConfig.wsPath ?? "/remote_pay"}`
-          : "Not configured");
+  const isCloverCloudWs = terminalTransport === "ws-cloud";
+  const isRealCloverTransport = isRealCloverLan || isCloverCloudRest || isCloverCloudWs;
+  const terminalEndpoint = isCloverCloudWs
+    ? terminalConfig?.cloudServer ?? "https://api.clover.com"
+    : isCloverCloudRest
+      ? terminalConfig?.cloudBaseUrl ?? "Not configured"
+      : terminalTransport === "rest-local"
+        ? terminalConfig?.deviceBaseUrl ?? "Not configured"
+        : terminalConfig?.wsUrl
+          ?? (terminalConfig?.wsHost
+            ? `${terminalConfig.wsSecure === false ? "ws" : "wss"}://${terminalConfig.wsHost}${terminalConfig.wsPort ? `:${terminalConfig.wsPort}` : ""}${terminalConfig.wsPath ?? "/remote_pay"}`
+            : "Not configured");
   const terminalDisplayName = isRealCloverLan
     ? "Clover Mini 3 LAN"
-    : isCloverCloudRest
-      ? "Clover Cloud REST Pay Display"
-      : terminalTransport === "rest-local"
-        ? "Mock Clover REST"
-        : "Mock terminal";
+    : isCloverCloudWs
+      ? "Clover Remote Pay Cloud"
+      : isCloverCloudRest
+        ? "Clover Cloud REST Pay Display"
+        : terminalTransport === "rest-local"
+          ? "Mock Clover REST"
+          : "Mock terminal";
   const terminalStep = terminalStatus?.connected
     ? "ready"
     : terminalStatus?.pairingCode
@@ -2399,7 +2412,7 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
     }
     try {
       const config = await fetchTerminalConfig();
-      if (storedForm) {
+      if (storedForm && config.transport === "mock") {
         const result = await updateTerminalConfig(updateFromTerminalConfigForm(storedForm));
         setTerminalConfig(result.config);
         setTerminalConfigForm(formFromTerminalConfig(result.config));
@@ -2429,7 +2442,7 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
       storeTerminalConfigForm(nextForm);
       updateTerminalStatus(result.status);
       setTerminalConfigOpen(false);
-      if (result.config.transport === "ws-lan" && !result.status.connected) {
+      if ((result.config.transport === "ws-lan" || result.config.transport === "ws-cloud") && !result.status.connected) {
         setPairingModalOpen(true);
       }
     } catch (err) {
@@ -2495,10 +2508,10 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
   }, [pairingModalOpen]);
 
   useEffect(() => {
-    if (activeMethod !== "card" || (terminalConfig?.transport !== "ws-lan" && terminalConfig?.transport !== "rest-cloud") || terminalStatus?.connected) return;
+    if (activeMethod !== "card" || !isRealCloverTransport || terminalStatus?.connected) return;
     const intervalId = window.setInterval(() => { void refreshTerminalStatus(); }, 3000);
     return () => window.clearInterval(intervalId);
-  }, [activeMethod, terminalConfig?.transport, terminalStatus?.connected]);
+  }, [activeMethod, isRealCloverTransport, terminalStatus?.connected]);
 
   const handleSelectWorker = (worker: Worker) => {
     setError("");
@@ -2627,11 +2640,11 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
   const prepareCardTerminal = async () => {
     const config = terminalConfig ?? await fetchTerminalConfig();
     setTerminalConfig(config);
-    if (config.transport !== "ws-lan" && config.transport !== "rest-cloud") return;
+    if (config.transport !== "ws-lan" && config.transport !== "rest-cloud" && config.transport !== "ws-cloud") return;
 
     const status = await fetchTerminalStatus();
     updateTerminalStatus(status);
-    if (config.transport === "ws-lan" && !status.connected) {
+    if ((config.transport === "ws-lan" || config.transport === "ws-cloud") && !status.connected) {
       setPairingModalOpen(true);
     }
   };
@@ -3051,10 +3064,10 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
                 </button>
                 <button
                   type="button"
-                  onClick={() => { isCloverCloudRest ? void refreshTerminalStatus() : void beginTerminalPairing(); }}
+                  onClick={() => { (isCloverCloudRest || isCloverCloudWs) ? void refreshTerminalStatus() : void beginTerminalPairing(); }}
                   disabled={terminalStatusLoading || terminalTransport === "mock"}
                 >
-                  {isCloverCloudRest ? "Check Connection" : "Connect / Pair"}
+                  {(isCloverCloudRest || isCloverCloudWs) ? "Check Connection" : "Connect / Pair"}
                 </button>
                 <button type="button" onClick={() => { void refreshTerminalStatus(); }} disabled={terminalStatusLoading}>
                   {terminalStatusLoading ? "..." : "Refresh"}
@@ -3091,19 +3104,19 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
             </div>
 
             {/* Exact payment button */}
-            {activeMethod === "card" && (terminalConfig?.transport === "ws-lan" || terminalConfig?.transport === "rest-cloud") && !terminalStatus?.connected && (
+            {activeMethod === "card" && isRealCloverTransport && !terminalStatus?.connected && (
               <div className="card-payment-readiness">
                 <strong>Clover is not ready</strong>
                 <span>You can still press Send to call the Clover adapter, but Clover may reject it until the terminal reports Ready.</span>
-                <button type="button" onClick={() => { isCloverCloudRest ? void refreshTerminalStatus() : void beginTerminalPairing(); }} disabled={terminalStatusLoading}>
-                  {isCloverCloudRest ? "Check Clover" : "Connect Clover"}
+                <button type="button" onClick={() => { (isCloverCloudRest || isCloverCloudWs) ? void refreshTerminalStatus() : void beginTerminalPairing(); }} disabled={terminalStatusLoading}>
+                  {(isCloverCloudRest || isCloverCloudWs) ? "Check Clover" : "Connect Clover"}
                 </button>
               </div>
             )}
             <div className="payment-action-stack">
               {remaining > 0 && (
                 <Button fullWidth variant="secondary" onClick={exactPayment} loading={loading} size="lg" className="payment-touch-button">
-                  {activeMethod === "card" && (terminalConfig?.transport === "ws-lan" || terminalConfig?.transport === "rest-cloud") ? "Send Exact to Clover" : "Pay Exact"}
+                  {activeMethod === "card" && isRealCloverTransport ? "Send Exact to Clover" : "Pay Exact"}
                   <span className="payment-touch-button__amount">{formatMoney(remaining)}</span>
                 </Button>
               )}
@@ -3146,7 +3159,7 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
         <>
           <Button variant="secondary" size="lg" onClick={() => setPaymentAmountModalOpen(false)}>Cancel</Button>
           <Button size="lg" onClick={() => { void addPayment(); }} loading={loading} disabled={amountCents <= 0 || remaining <= 0}>
-            {activeMethod === "card" && (terminalConfig?.transport === "ws-lan" || terminalConfig?.transport === "rest-cloud") ? "Send to Clover" : `Add ${methodLabel(activeMethod)}`}
+            {activeMethod === "card" && isRealCloverTransport ? "Send to Clover" : `Add ${methodLabel(activeMethod)}`}
           </Button>
         </>
       }
@@ -3194,6 +3207,7 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
           onChange={(event) => setTerminalConfigForm((form) => ({ ...form, transport: event.target.value as TerminalConfigForm["transport"] }))}
           options={[
             { value: "mock", label: "Built-in mock terminal" },
+            { value: "ws-cloud", label: "Clover Remote Pay Cloud" },
             { value: "ws-lan", label: "Real Clover LAN WebSocket" },
             { value: "rest-cloud", label: "Clover Cloud REST Pay Display" },
             { value: "rest-local", label: "Mock Clover / REST-local" },
@@ -3202,16 +3216,29 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
         {terminalConfigForm.transport === "rest-cloud" && (
           <>
             <div className="clover-process-panel clover-process-panel--compact">
-              <div><strong>Cloud REST process:</strong> enter the Clover cloud endpoint, merchant/app details, device ID, POS ID, and access token. OAuth token setup is manual for this version.</div>
+              <div><strong>Cloud REST process:</strong> Cloud Pay Display must be installed, open, and started on the Clover Mini. Enter the Clover endpoint, device ID, POS ID, and access token. OAuth token setup is manual for this version.</div>
             </div>
-            <Input label="Clover Cloud Base URL" value={terminalConfigForm.cloudBaseUrl} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, cloudBaseUrl: event.target.value }))} placeholder="https://sandbox.dev.clover.com/connect" />
-            <Input label="Merchant ID" value={terminalConfigForm.merchantId} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, merchantId: event.target.value }))} placeholder="13-character Clover ID" />
-            <Input label="App ID" value={terminalConfigForm.appId} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, appId: event.target.value }))} placeholder="Clover app ID" />
-            <Input label={`App Secret${terminalConfig?.appSecretPreview ? ` (${terminalConfig.appSecretPreview})` : ""}`} value={terminalConfigForm.appSecret} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, appSecret: event.target.value }))} placeholder="Leave blank to keep existing secret" />
+            <Input label="Clover Cloud Base URL" value={terminalConfigForm.cloudBaseUrl} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, cloudBaseUrl: event.target.value }))} placeholder="https://api.clover.com/connect" />
+            <Input label="Merchant ID (optional)" value={terminalConfigForm.merchantId} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, merchantId: event.target.value }))} placeholder="13-character Clover ID" />
+            <Input label="Cloud/Remote App ID (optional)" value={terminalConfigForm.appId} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, appId: event.target.value }))} placeholder="RQ07XH5Z3EX44.BT1G67W0JJFVC" />
+            <Input label={`App Secret (optional)${terminalConfig?.appSecretPreview ? ` (${terminalConfig.appSecretPreview})` : ""}`} value={terminalConfigForm.appSecret} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, appSecret: event.target.value }))} placeholder="Not required for REST Pay Display" />
             <Input label={`Access Token${terminalConfig?.accessTokenPreview ? ` (${terminalConfig.accessTokenPreview})` : ""}`} value={terminalConfigForm.accessToken} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, accessToken: event.target.value }))} placeholder="Leave blank to keep existing token" />
             <Input label="Device ID" value={terminalConfigForm.deviceId} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, deviceId: event.target.value }))} placeholder="Clover device ID" />
             <Input label="POS ID" value={terminalConfigForm.posId} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, posId: event.target.value }))} placeholder="owner-pos" />
             <Input label="Remote App ID" value={terminalConfigForm.remoteApplicationId} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, remoteApplicationId: event.target.value }))} placeholder="developerId.appId" />
+          </>
+        )}
+        {terminalConfigForm.transport === "ws-cloud" && (
+          <>
+            <div className="clover-process-panel clover-process-panel--compact">
+              <div><strong>Remote Pay Cloud process:</strong> Cloud Pay Display must be installed, open, and started on the Clover Mini. The local API connects through Clover's Remote Pay Cloud SDK using merchant, device, app, token, server, and friendly ID.</div>
+            </div>
+            <Input label="Clover Server" value={terminalConfigForm.cloudServer} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, cloudServer: event.target.value }))} placeholder="https://api.clover.com" />
+            <Input label="Merchant ID" value={terminalConfigForm.merchantId} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, merchantId: event.target.value }))} placeholder="HDSPNPKW4VXZ1" />
+            <Input label="Remote App ID" value={terminalConfigForm.remoteApplicationId} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, remoteApplicationId: event.target.value }))} placeholder="RQ07XH5Z3EX44.BT1G67W0JJFVC" />
+            <Input label="Device ID" value={terminalConfigForm.deviceId} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, deviceId: event.target.value }))} placeholder="C035UT24950367" />
+            <Input label="Friendly ID" value={terminalConfigForm.friendlyId} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, friendlyId: event.target.value }))} placeholder="TL Nails And Spa 625" />
+            <Input label={`Access Token${terminalConfig?.accessTokenPreview ? ` (${terminalConfig.accessTokenPreview})` : ""}`} value={terminalConfigForm.accessToken} onChange={(event) => setTerminalConfigForm((form) => ({ ...form, accessToken: event.target.value }))} placeholder="Leave blank to keep existing token" />
           </>
         )}
         {terminalConfigForm.transport === "ws-lan" && (
@@ -3247,7 +3274,7 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
     <Modal
       open={pairingModalOpen}
       onClose={() => setPairingModalOpen(false)}
-      title={isRealCloverLan ? "Connect Clover Mini 3" : "Pair Clover Device"}
+      title={isCloverCloudWs ? "Connect Clover Cloud" : isRealCloverLan ? "Connect Clover Mini 3" : "Pair Clover Device"}
       className="clover-pairing-modal"
       footer={
         <>
@@ -3257,7 +3284,7 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
           <Button variant="secondary" onClick={() => { void beginTerminalPairing(); }} loading={terminalStatusLoading}>
             Restart Connect
           </Button>
-          {!isRealCloverLan && (
+          {!isRealCloverLan && !isCloverCloudWs && (
             <Button onClick={() => { void submitTerminalPairingCode(); }} loading={terminalStatusLoading}>
               Pair
             </Button>
@@ -3268,6 +3295,16 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
       {terminalStatus?.connected ? (
         <div className="clover-pairing-status clover-pairing-status--connected">
           Clover is connected and ready for card payments.
+        </div>
+      ) : isCloverCloudWs ? (
+        <div className="clover-pairing-content">
+          <div className="clover-process-panel">
+            <div><strong>1.</strong> Keep Cloud Pay Display open and started on the Clover Mini.</div>
+            <div><strong>2.</strong> POS connects to {terminalEndpoint} through Clover Remote Pay Cloud.</div>
+            <div><strong>3.</strong> Wait for status to change to Ready, then send the card payment.</div>
+          </div>
+          <p className="clover-pairing-status">{terminalStatus?.message ?? "Waiting for Clover Remote Pay Cloud ready status..."}</p>
+          {pairingError && <p className="field__error">{pairingError}</p>}
         </div>
       ) : isRealCloverLan ? (
         <div className="clover-pairing-content">

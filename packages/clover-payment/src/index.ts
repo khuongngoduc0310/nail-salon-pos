@@ -6,7 +6,7 @@ import { config as loadEnv } from "dotenv";
 const require = createRequire(import.meta.url);
 loadEnv({ path: fileURLToPath(new URL("../../../.env", import.meta.url)) });
 
-export type CloverTransport = "mock" | "rest-local" | "rest-cloud" | "usb-sidecar" | "ws-lan";
+export type CloverTransport = "mock" | "rest-local" | "rest-cloud" | "usb-sidecar" | "ws-lan" | "ws-cloud";
 
 export type CloverPaymentStatus = "approved" | "declined" | "cancelled" | "failed";
 
@@ -110,6 +110,8 @@ export type CloverPaymentConfig = {
   posName?: string;
   serialNumber?: string;
   authToken?: string;
+  cloudServer?: string;
+  friendlyId?: string;
 };
 
 export type CloverPaymentEnv = Record<string, string | undefined>;
@@ -126,12 +128,15 @@ type CloverRemotePayCloudSdk = Record<string, unknown> & {
   remotepay?: Record<string, unknown>;
   CloverConnectorFactoryBuilder?: Record<string, unknown>;
   WebSocketPairedCloverDeviceConfigurationBuilder?: new (...args: unknown[]) => CloverBuilder;
+  WebSocketCloudCloverDeviceConfigurationBuilder?: new (...args: unknown[]) => CloverBuilder;
   CardEntryMethods?: Record<string, unknown>;
 };
 
 type CloverBuilder = {
   setWebSocketFactoryFunction?: (factory: unknown) => CloverBuilder;
   setHeartbeatInterval?: (value: number) => CloverBuilder;
+  setCloverServer?: (value: string) => CloverBuilder;
+  setFriendlyId?: (value: string) => CloverBuilder;
   build: () => unknown;
 };
 
@@ -198,6 +203,8 @@ export function loadCloverPaymentConfig(env: CloverPaymentEnv = readProcessEnv()
     posName: trimOptional(env.CLOVER_POS_NAME),
     serialNumber: trimOptional(env.CLOVER_SERIAL_NUMBER),
     authToken: trimOptional(env.CLOVER_AUTH_TOKEN),
+    cloudServer: trimOptional(env.CLOVER_CLOUD_SERVER) ?? trimOptional(env.CLOVER_SERVER),
+    friendlyId: trimOptional(env.CLOVER_FRIENDLY_ID),
   };
 }
 
@@ -213,9 +220,6 @@ export function validateCloverPaymentConfig(config: CloverPaymentConfig): string
 
   if (config.transport === "rest-cloud") {
     requireConfig(errors, config.cloudBaseUrl, "CLOVER_CLOUD_BASE_URL is required for rest-cloud transport");
-    requireConfig(errors, config.merchantId, "CLOVER_MERCHANT_ID is required for rest-cloud transport");
-    requireConfig(errors, config.appId, "CLOVER_APP_ID is required for rest-cloud transport");
-    requireConfig(errors, config.appSecret, "CLOVER_APP_SECRET is required for rest-cloud transport");
     requireConfig(errors, config.deviceId, "CLOVER_DEVICE_ID is required for rest-cloud transport");
     requireConfig(errors, config.posId, "CLOVER_POS_ID is required for rest-cloud transport");
     requireConfig(errors, config.accessToken, "CLOVER_ACCESS_TOKEN is required for rest-cloud transport");
@@ -230,6 +234,14 @@ export function validateCloverPaymentConfig(config: CloverPaymentConfig): string
     requireConfig(errors, config.remoteApplicationId, "CLOVER_REMOTE_APP_ID is required for ws-lan transport");
     requireConfig(errors, config.posName, "CLOVER_POS_NAME is required for ws-lan transport");
     requireConfig(errors, config.serialNumber, "CLOVER_SERIAL_NUMBER is required for ws-lan transport");
+  }
+
+  if (config.transport === "ws-cloud") {
+    requireConfig(errors, config.remoteApplicationId, "CLOVER_REMOTE_APP_ID is required for ws-cloud transport");
+    requireConfig(errors, config.deviceId, "CLOVER_DEVICE_ID is required for ws-cloud transport");
+    requireConfig(errors, config.merchantId, "CLOVER_MERCHANT_ID is required for ws-cloud transport");
+    requireConfig(errors, config.accessToken, "CLOVER_ACCESS_TOKEN is required for ws-cloud transport");
+    requireConfig(errors, config.cloudServer, "CLOVER_CLOUD_SERVER is required for ws-cloud transport");
   }
 
   return errors;
@@ -256,7 +268,7 @@ export function createCloverPaymentAdapter(
     return new UsbSidecarAdapter(config, options);
   }
 
-  if (config.transport === "ws-lan") {
+  if (config.transport === "ws-lan" || config.transport === "ws-cloud") {
     return new CloverRemotePayLanAdapter(config, options);
   }
 
@@ -379,26 +391,28 @@ export class CloverRemotePayLanAdapter implements CloverPaymentAdapter {
   async verifyConnection(): Promise<CloverConnectionStatus> {
     try {
       this.ensureConnector();
+      const label = this.config.transport === "ws-cloud" ? "Cloud" : "LAN";
       return {
         connected: this.connected,
         provider: "clover",
-        transport: "ws-lan",
-        deviceId: this.config.serialNumber,
+        transport: this.config.transport,
+        deviceId: this.getStatusDeviceId(),
         pairingRequired: this.pairingRequired,
         pairingCode: this.pairingCode,
         message: this.connected
-          ? "Clover Remote Pay LAN device ready"
+          ? `Clover Remote Pay ${label} device ready`
           : this.pairingCode
             ? `Enter pairing code ${this.pairingCode} on the Clover device`
-            : "Clover Remote Pay LAN connection initializing",
+            : `Clover Remote Pay ${label} connection initializing`,
       };
     } catch (error) {
+      const label = this.config.transport === "ws-cloud" ? "Cloud" : "LAN";
       return {
         connected: false,
         provider: "clover",
-        transport: "ws-lan",
-        deviceId: this.config.serialNumber,
-        message: error instanceof Error ? error.message : "Clover Remote Pay LAN connection failed",
+        transport: this.config.transport,
+        deviceId: this.getStatusDeviceId(),
+        message: error instanceof Error ? error.message : `Clover Remote Pay ${label} connection failed`,
       };
     }
   }
@@ -472,7 +486,7 @@ export class CloverRemotePayLanAdapter implements CloverPaymentAdapter {
     const payment = await this.retrievePayment(input.externalPaymentId);
     return {
       provider: "clover",
-      transport: "ws-lan",
+      transport: this.config.transport,
       cardTotalCents: payment?.totalChargedCents ?? 0,
       payments: payment ? [payment] : [],
     };
@@ -527,20 +541,22 @@ export class CloverRemotePayLanAdapter implements CloverPaymentAdapter {
     };
     const Configuration = this.sdk.WebSocketPairedCloverDeviceConfiguration as new (...args: unknown[]) => unknown;
     const websocketFactory = this.createWebSocketFactory();
-    const configuration = typeof Configuration === "function"
-      ? new Configuration(
-        requireConfigValue(this.config.wsUrl, "wsUrl"),
-        requireConfigValue(this.config.remoteApplicationId, "remoteApplicationId"),
-        requireConfigValue(this.config.posName, "posName"),
-        requireConfigValue(this.config.serialNumber, "serialNumber"),
-        this.authToken ?? null,
-        onPairingCode,
-        onPairingSuccess,
-        websocketFactory,
-        null,
-        -1
-      )
-      : this.createPairedConfigurationWithBuilder(onPairingCode, onPairingSuccess, websocketFactory);
+    const configuration = this.config.transport === "ws-cloud"
+      ? this.createCloudConfiguration()
+      : typeof Configuration === "function"
+        ? new Configuration(
+          requireConfigValue(this.config.wsUrl, "wsUrl"),
+          requireConfigValue(this.config.remoteApplicationId, "remoteApplicationId"),
+          requireConfigValue(this.config.posName, "posName"),
+          requireConfigValue(this.config.serialNumber, "serialNumber"),
+          this.authToken ?? null,
+          onPairingCode,
+          onPairingSuccess,
+          websocketFactory,
+          null,
+          -1
+        )
+        : this.createPairedConfigurationWithBuilder(onPairingCode, onPairingSuccess, websocketFactory);
     configurationRecord = asRecord(configuration);
 
     const factoryBuilder = asRecord(this.sdk.CloverConnectorFactoryBuilder);
@@ -560,6 +576,28 @@ export class CloverRemotePayLanAdapter implements CloverPaymentAdapter {
     connector.initializeConnection();
     this.connector = connector;
     return connector;
+  }
+
+  private createCloudConfiguration(): unknown {
+    const Builder = this.sdk.WebSocketCloudCloverDeviceConfigurationBuilder;
+    if (!Builder) {
+      throw new Error("remote-pay-cloud WebSocketCloudCloverDeviceConfigurationBuilder is unavailable");
+    }
+    const builder = new Builder(
+      requireConfigValue(this.config.remoteApplicationId, "remoteApplicationId"),
+      requireConfigValue(this.config.deviceId, "deviceId"),
+      requireConfigValue(this.config.merchantId, "merchantId"),
+      requireConfigValue(this.config.accessToken, "accessToken")
+    );
+    builder.setCloverServer?.(requireConfigValue(this.config.cloudServer, "cloudServer"));
+    if (this.config.friendlyId) {
+      builder.setFriendlyId?.(this.config.friendlyId);
+    }
+    return builder.build();
+  }
+
+  private getStatusDeviceId(): string | undefined {
+    return this.config.transport === "ws-cloud" ? this.config.deviceId : this.config.serialNumber;
   }
 
   private createPairedConfigurationWithBuilder(
@@ -628,22 +666,12 @@ export class CloverRemotePayLanAdapter implements CloverPaymentAdapter {
   }
 
   private createWebSocketFactory(): unknown {
+    this.installRemotePayNodeGlobals();
     if (this.config.transport !== "ws-lan") return undefined;
     if (this.websocketFactory) {
       return this.websocketFactory;
     }
     try {
-      process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-      const NodeWebSocket = require("ws");
-      const globals = globalThis as Record<string, unknown>;
-      globals.WebSocket = function WebSocket(endpoint: string, accessToken?: string) {
-        return new NodeWebSocket(endpoint, accessToken, { rejectUnauthorized: false });
-      };
-      try {
-        globals.XMLHttpRequest = require("xmlhttprequest-ssl").XMLHttpRequest;
-      } catch {
-        // XMLHttpRequest is only needed by a few remote-pay-cloud code paths.
-      }
       const BrowserWebSocketImpl = this.sdk.BrowserWebSocketImpl as new (endpoint: string) => unknown;
       if (typeof BrowserWebSocketImpl === "function") {
         return (endpoint: string) => new BrowserWebSocketImpl(endpoint);
@@ -651,6 +679,24 @@ export class CloverRemotePayLanAdapter implements CloverPaymentAdapter {
       return undefined;
     } catch {
       return undefined;
+    }
+  }
+
+  private installRemotePayNodeGlobals(): void {
+    const globals = globalThis as Record<string, unknown>;
+    try {
+      process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+      const NodeWebSocket = require("ws");
+      globals.WebSocket = function WebSocket(endpoint: string, accessToken?: string) {
+        return new NodeWebSocket(endpoint, accessToken, { rejectUnauthorized: false });
+      };
+    } catch {
+      // Browser runtimes already provide WebSocket.
+    }
+    try {
+      globals.XMLHttpRequest = require("xmlhttprequest-ssl").XMLHttpRequest;
+    } catch {
+      // Browser runtimes already provide XMLHttpRequest.
     }
   }
 
@@ -776,13 +822,13 @@ export class CloverCloudPayDisplayAdapter implements CloverPaymentAdapter {
 
   async verifyConnection(): Promise<CloverConnectionStatus> {
     try {
-      await this.postJson("/v1/device/welcome", {});
+      await this.postJson("/v1/device/ping", {});
       return {
         connected: true,
         provider: "clover",
         transport: "rest-cloud",
         deviceId: this.config.deviceId,
-        message: "Clover Cloud REST Pay Display endpoint responded",
+        message: "Clover Mini Cloud Pay Display is connected",
       };
     } catch (error) {
       return {
@@ -854,20 +900,19 @@ export class CloverCloudPayDisplayAdapter implements CloverPaymentAdapter {
   private async requestJson(path: string, init: RequestInit, options: { idempotencyKey?: string } = {}): Promise<unknown> {
     const headers = new Headers(init.headers);
     headers.set("Accept", "application/json");
+    headers.set("User-Agent", "NailSalonPOS/1.0 (local-api)");
     headers.set("Authorization", `Bearer ${requireConfigValue(this.config.accessToken, "accessToken")}`);
-    headers.set("X-Clover-Merchant-Id", requireConfigValue(this.config.merchantId, "merchantId"));
-    headers.set("X-Clover-App-Id", requireConfigValue(this.config.appId, "appId"));
     headers.set("X-Clover-Device-Id", requireConfigValue(this.config.deviceId, "deviceId"));
     headers.set("X-POS-ID", requireConfigValue(this.config.posId, "posId"));
-    if (this.config.remoteApplicationId) {
-      headers.set("X-Clover-Remote-App-Id", this.config.remoteApplicationId);
-    }
+    if (this.config.merchantId) headers.set("X-Clover-Merchant-Id", this.config.merchantId);
+    if (this.config.appId) headers.set("X-Clover-App-Id", this.config.appId);
+    if (this.config.remoteApplicationId) headers.set("X-Clover-Remote-App-Id", this.config.remoteApplicationId);
     if (options.idempotencyKey) {
       headers.set("Idempotency-Key", options.idempotencyKey);
     }
     const response = await this.http(`${this.baseUrl}${path}`, { ...init, headers });
     if (!response.ok) {
-      throw new Error(`Clover Cloud REST Pay Display request failed: ${response.status} ${response.statusText}`);
+      throw new Error(`Clover Cloud REST Pay Display request failed: ${response.status} ${response.statusText}${await readCloverErrorDetail(response)}`);
     }
     return response.json();
   }
@@ -947,7 +992,7 @@ export class UsbSidecarAdapter implements CloverPaymentAdapter {
 
 function parseTransport(value: string | undefined): CloverTransport {
   const normalized = trimOptional(value) ?? "mock";
-  if (normalized === "mock" || normalized === "rest-local" || normalized === "rest-cloud" || normalized === "usb-sidecar" || normalized === "ws-lan") {
+  if (normalized === "mock" || normalized === "rest-local" || normalized === "rest-cloud" || normalized === "usb-sidecar" || normalized === "ws-lan" || normalized === "ws-cloud") {
     return normalized;
   }
   throw new Error(`Unsupported CLOVER_TRANSPORT: ${normalized}`);
@@ -1356,6 +1401,19 @@ function isSensitiveKey(key: string): boolean {
     "fullpan",
     "cardpan",
   ]).has(normalized);
+}
+
+async function readCloverErrorDetail(response: Response): Promise<string> {
+  try {
+    const body = await response.text();
+    if (!body) return "";
+    const parsed = JSON.parse(body) as { message?: unknown; type?: unknown; code?: unknown };
+    const message = typeof parsed.message === "string" ? parsed.message : undefined;
+    const code = typeof parsed.code === "string" ? parsed.code : typeof parsed.type === "string" ? parsed.type : undefined;
+    return message ? ` - ${code ? `${code}: ` : ""}${message}` : ` - ${body.slice(0, 200)}`;
+  } catch {
+    return "";
+  }
 }
 
 function readProcessEnv(): CloverPaymentEnv {

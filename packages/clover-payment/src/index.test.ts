@@ -80,9 +80,6 @@ describe("Clover config", () => {
   it("validates rest-cloud required fields", () => {
     expect(validateCloverPaymentConfig({ transport: "rest-cloud" })).toEqual([
       "CLOVER_CLOUD_BASE_URL is required for rest-cloud transport",
-      "CLOVER_MERCHANT_ID is required for rest-cloud transport",
-      "CLOVER_APP_ID is required for rest-cloud transport",
-      "CLOVER_APP_SECRET is required for rest-cloud transport",
       "CLOVER_DEVICE_ID is required for rest-cloud transport",
       "CLOVER_POS_ID is required for rest-cloud transport",
       "CLOVER_ACCESS_TOKEN is required for rest-cloud transport",
@@ -101,6 +98,8 @@ describe("Clover config", () => {
       CLOVER_POS_ID: "owner-pos",
       CLOVER_REMOTE_APP_ID: "DEV.APP123",
       CLOVER_PAYMENT_TIMEOUT_MS: "90000",
+      CLOVER_CLOUD_SERVER: "https://api.clover.com",
+      CLOVER_FRIENDLY_ID: "TL Nails And Spa 625",
     })).toMatchObject({
       transport: "rest-cloud",
       cloudBaseUrl: "https://sandbox.clover.example/connect",
@@ -112,6 +111,8 @@ describe("Clover config", () => {
       posId: "owner-pos",
       remoteApplicationId: "DEV.APP123",
       wsTimeoutMs: 90000,
+      cloudServer: "https://api.clover.com",
+      friendlyId: "TL Nails And Spa 625",
     });
   });
 
@@ -127,6 +128,16 @@ describe("Clover config", () => {
       "CLOVER_REMOTE_APP_ID is required for ws-lan transport",
       "CLOVER_POS_NAME is required for ws-lan transport",
       "CLOVER_SERIAL_NUMBER is required for ws-lan transport",
+    ]);
+  });
+
+  it("validates cloud WebSocket required fields", () => {
+    expect(validateCloverPaymentConfig({ transport: "ws-cloud" })).toEqual([
+      "CLOVER_REMOTE_APP_ID is required for ws-cloud transport",
+      "CLOVER_DEVICE_ID is required for ws-cloud transport",
+      "CLOVER_MERCHANT_ID is required for ws-cloud transport",
+      "CLOVER_ACCESS_TOKEN is required for ws-cloud transport",
+      "CLOVER_CLOUD_SERVER is required for ws-cloud transport",
     ]);
   });
 
@@ -262,6 +273,7 @@ describe("HTTP adapters", () => {
 
     expect(calls[0].url).toBe("https://sandbox.clover.example/card-present/v1/payments");
     expect((calls[0].init?.headers as Headers).get("Authorization")).toBe("Bearer token");
+    expect((calls[0].init?.headers as Headers).get("User-Agent")).toBe("NailSalonPOS/1.0 (local-api)");
     expect((calls[0].init?.headers as Headers).get("X-Clover-Merchant-Id")).toBe("MERCHANT123");
     expect((calls[0].init?.headers as Headers).get("X-Clover-App-Id")).toBe("APP123");
     expect((calls[0].init?.headers as Headers).get("X-Clover-Device-Id")).toBe("mini-cloud");
@@ -351,6 +363,41 @@ describe("HTTP adapters", () => {
     expect(JSON.stringify(result.rawProviderReference)).not.toContain("emvData");
   });
 
+  it("uses remote-pay-cloud cloud configuration and sale APIs", async () => {
+    const sdk = createFakeRemotePayCloudSdk();
+    const adapter = new CloverRemotePayLanAdapter(
+      {
+        transport: "ws-cloud",
+        wsTimeoutMs: 1000,
+        remoteApplicationId: "RQ07XH5Z3EX44.BT1G67W0JJFVC",
+        deviceId: "C035UT24950367",
+        merchantId: "HDSPNPKW4VXZ1",
+        accessToken: "access-token",
+        cloudServer: "https://api.clover.com",
+        friendlyId: "TL Nails And Spa 625",
+      },
+      { remotePayCloud: sdk as never }
+    );
+
+    await expect(adapter.verifyConnection()).resolves.toMatchObject({ connected: true, transport: "ws-cloud", deviceId: "C035UT24950367" });
+    await expect(adapter.startCardSale({ amountCents: 4200, idempotencyKey: "cloud-ws-1" })).resolves.toMatchObject({
+      status: "approved",
+      providerPaymentId: "ws-payment-1",
+      baseAmountCents: 4200,
+      totalChargedCents: 4700,
+    });
+
+    expect((sdk as FakeRemotePayCloudSdk).cloudBuilders[0]).toMatchObject({
+      applicationId: "RQ07XH5Z3EX44.BT1G67W0JJFVC",
+      deviceId: "C035UT24950367",
+      merchantId: "HDSPNPKW4VXZ1",
+      accessToken: "access-token",
+      cloverServer: "https://api.clover.com",
+      friendlyId: "TL Nails And Spa 625",
+    });
+    expect((sdk as FakeRemotePayCloudSdk).sales[0]).toMatchObject({ externalId: "cloud-ws-1", amount: 4200 });
+  });
+
   it("normalizes USB sidecar status and sale responses", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const http = routeFetch(calls, {
@@ -393,6 +440,7 @@ type FakeRemotePayCloudSdk = ReturnType<typeof createFakeRemotePayCloudSdk>;
 
 function createFakeRemotePayCloudSdk() {
   const builders: unknown[] = [];
+  const cloudBuilders: unknown[] = [];
   const sales: unknown[] = [];
   let listener: Record<string, (value?: unknown) => void> = {};
 
@@ -424,6 +472,22 @@ function createFakeRemotePayCloudSdk() {
     build(): unknown { return this; }
   }
 
+  class FakeCloudBuilder {
+    cloverServer = "";
+    friendlyId = "";
+    constructor(
+      readonly applicationId: string,
+      readonly deviceId: string,
+      readonly merchantId: string,
+      readonly accessToken: string
+    ) {
+      cloudBuilders.push(this);
+    }
+    setCloverServer(value: string): this { this.cloverServer = value; return this; }
+    setFriendlyId(value: string): this { this.friendlyId = value; return this; }
+    build(): unknown { return this; }
+  }
+
   const connector = {
     addCloverConnectorListener(value: unknown) { listener = value as Record<string, (value?: unknown) => void>; },
     initializeConnection() { listener.onDeviceReady?.({}); },
@@ -451,6 +515,7 @@ function createFakeRemotePayCloudSdk() {
 
   return {
     builders,
+    cloudBuilders,
     sales,
     remotepay: {
       SaleRequest: FakeSaleRequest,
@@ -459,6 +524,7 @@ function createFakeRemotePayCloudSdk() {
     },
     CardEntryMethods: { ALL: 7 },
     WebSocketPairedCloverDeviceConfigurationBuilder: FakeBuilder,
+    WebSocketCloudCloverDeviceConfigurationBuilder: FakeCloudBuilder,
     CloverConnectorFactoryBuilder: {
       FACTORY_VERSION: "factoryVersion",
       VERSION_12: 12,

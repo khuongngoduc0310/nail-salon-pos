@@ -57,7 +57,8 @@ export class RuntimePaymentTerminalManager implements PaymentTerminalAdapter {
   }
 
   updateConfig(update: TerminalConfigUpdate): SafeTerminalConfig {
-    const nextConfig = normalizeTerminalConfig({ ...this.config, ...update });
+    const sanitizedUpdate = preserveExistingSecretsWhenBlank(update);
+    const nextConfig = normalizeTerminalConfig({ ...this.config, ...sanitizedUpdate });
     const errors = validateTerminalConfig(nextConfig);
     if (errors.length > 0) {
       throw new Error(errors.join("; "));
@@ -185,6 +186,14 @@ function createAdapterForConfig(config: CloverPaymentConfig): PaymentTerminalAda
   return new CloverTerminalAdapter(createCloverPaymentAdapter(config));
 }
 
+function preserveExistingSecretsWhenBlank(update: TerminalConfigUpdate): TerminalConfigUpdate {
+  const sanitized = { ...update };
+  if (sanitized.accessToken === undefined) delete sanitized.accessToken;
+  if (sanitized.appSecret === undefined) delete sanitized.appSecret;
+  if (sanitized.authToken === undefined) delete sanitized.authToken;
+  return sanitized;
+}
+
 function normalizeTerminalConfig(config: CloverPaymentConfig): CloverPaymentConfig {
   const transport = config.transport ?? "mock";
   const normalized: CloverPaymentConfig = {
@@ -205,6 +214,8 @@ function normalizeTerminalConfig(config: CloverPaymentConfig): CloverPaymentConf
     posName: trimString(config.posName),
     serialNumber: trimString(config.serialNumber),
     authToken: trimString(config.authToken),
+    cloudServer: trimString(config.cloudServer),
+    friendlyId: trimString(config.friendlyId),
   };
   normalized.wsUrl = buildWsUrl(normalized);
   return normalized;
@@ -256,8 +267,8 @@ function trimString(value: string | undefined): string | undefined {
 }
 
 export function parseTerminalTransport(value: unknown): CloverTransport {
-  if (value === "mock" || value === "rest-local" || value === "rest-cloud" || value === "usb-sidecar" || value === "ws-lan") {
+  if (value === "mock" || value === "rest-local" || value === "rest-cloud" || value === "usb-sidecar" || value === "ws-lan" || value === "ws-cloud") {
     return value;
   }
-  throw new Error("transport must be mock, rest-local, rest-cloud, usb-sidecar, or ws-lan");
+  throw new Error("transport must be mock, rest-local, rest-cloud, usb-sidecar, ws-lan, or ws-cloud");
 }
