@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   assignTurn,
@@ -19,6 +19,7 @@ import {
   createSale,
   addSaleItem,
   removeSaleItem,
+  updateSaleItem,
   addCashPayment,
   addGiftCardPayment,
   addCardPayment,
@@ -28,6 +29,8 @@ import {
   startTerminalPairing,
   fetchTerminalPairStatus,
   confirmTerminalPairing,
+  updatePaymentProviderReference,
+  createSaleAdjustment,
   allocateCardTip,
   completeSale,
   fetchCurrentSession,
@@ -97,9 +100,16 @@ type View =
   | "reports";
 
 type PaymentEntry = {
+  id?: string;
   method: string;
   amountCents: number;
   tipCents?: number;
+  provider?: string | null;
+  providerOrderId?: string | null;
+  providerPaymentId?: string | null;
+  authCode?: string | null;
+  cardBrand?: string | null;
+  cardLast4?: string | null;
 };
 
 type CheckoutDraft = {
@@ -247,6 +257,24 @@ function SecurePinModal({
     }
   }, [open]);
 
+  const updatePin = (value: string) => {
+    setPin(value.replace(/\D/g, "").slice(0, 6));
+    if (error) setError("");
+  };
+
+  const pressPinKey = (key: string) => {
+    if (loading) return;
+    if (key === "clear") {
+      updatePin("");
+      return;
+    }
+    if (key === "backspace") {
+      updatePin(pin.slice(0, -1));
+      return;
+    }
+    updatePin(`${pin}${key}`);
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (pin.length < 4) {
@@ -277,8 +305,35 @@ function SecurePinModal({
     >
       <form id="secure-pin-form" className="login-form" onSubmit={handleSubmit}>
           <p className="text-muted text-sm" style={{ marginTop: 0 }}>{description}</p>
-          <Input label="Owner PIN" type="password" value={pin} onChange={(e) => setPin(e.target.value)} placeholder="Enter PIN" maxLength={6} autoFocus />
-          {error && <p className="field__error">{error}</p>}
+          <Input
+            label="Owner PIN"
+            type="password"
+            value={pin}
+            onChange={(e) => updatePin(e.target.value)}
+            placeholder="Enter PIN"
+            maxLength={6}
+            inputMode="numeric"
+            pattern="[0-9]*"
+            autoComplete="current-password"
+            autoFocus
+          />
+          {error && <p className="field__error" role="alert">{error}</p>}
+          <div className="pin-keypad" role="group" aria-label="Owner PIN keypad">
+            {["1", "2", "3", "4", "5", "6", "7", "8", "9"].map((digit) => (
+              <button key={digit} type="button" className="pin-keypad__key" disabled={loading} onClick={() => pressPinKey(digit)}>
+                {digit}
+              </button>
+            ))}
+            <button type="button" className="pin-keypad__key pin-keypad__key--action" disabled={loading || pin.length === 0} onClick={() => pressPinKey("clear")} aria-label="Clear PIN">
+              Clear
+            </button>
+            <button type="button" className="pin-keypad__key" disabled={loading} onClick={() => pressPinKey("0")}>
+              0
+            </button>
+            <button type="button" className="pin-keypad__key pin-keypad__key--action" disabled={loading || pin.length === 0} onClick={() => pressPinKey("backspace")} aria-label="Delete last digit">
+              ⌫
+            </button>
+          </div>
       </form>
     </Modal>
   );
@@ -478,6 +533,11 @@ function Dashboard({
     onStartCheckout();
   };
 
+  const handleManualTicket = () => {
+    clearCheckoutDraft();
+    onStartCheckout();
+  };
+
   return (
     <div className="floor-page">
       <FloorSessionBar
@@ -624,6 +684,7 @@ function Dashboard({
             <ReadyCheckoutRail
               checkins={checkoutCheckins}
               onStartSale={(checkinId) => { void handleStartSale(checkinId); }}
+              onStartManualTicket={handleManualTicket}
             />
           </div>
 
@@ -1313,18 +1374,27 @@ function FloorWorkerCard({
 function ReadyCheckoutRail({
   checkins,
   onStartSale,
+  onStartManualTicket,
 }: {
   checkins: Checkin[];
   onStartSale: (checkinId: string) => void;
+  onStartManualTicket: () => void;
 }) {
   return (
     <Card padding="lg" className="floor-panel floor-panel--checkout">
       <div className="card__header">
-        <h2 className="card__title">Ready for Checkout</h2>
+        <div>
+          <p className="eyebrow">Tickets</p>
+          <h2 className="card__title">Ready for Checkout</h2>
+        </div>
         <Badge variant="success">{checkins.length}</Badge>
       </div>
+      <button type="button" className="manual-ticket-button" onClick={onStartManualTicket}>
+        <strong>+ Manual Ticket</strong>
+        <small>Add a walk-in sale without a check-in</small>
+      </button>
       {checkins.length === 0 ? (
-        <EmptyState icon="Sale" title="None ready" description="Completed turns appear here for checkout." />
+        <EmptyState icon="Sale" title="None ready" description="Completed turns appear here for checkout, or use Manual Ticket for an immediate sale." />
       ) : (
         <div className="floor-checkout-list">
           {checkins.map((checkin) => (
@@ -2061,6 +2131,8 @@ export const MOCK_ASSIGN_WORKERS: AssignWorker[] = [
 
 type CheckoutItem = {
   saleItemId?: string;
+  serviceId?: string;
+  workerId?: string;
   serviceName: string;
   workerName: string;
   category: string;
@@ -2253,6 +2325,11 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
   const [customServicePriceCents, setCustomServicePriceCents] = useState(0);
   const [customServiceCategory, setCustomServiceCategory] = useState("Custom");
   const [customServiceError, setCustomServiceError] = useState("");
+  const [editingItemIndex, setEditingItemIndex] = useState<number | null>(null);
+  const [editItemWorkerId, setEditItemWorkerId] = useState("");
+  const [editItemPriceCents, setEditItemPriceCents] = useState(0);
+  const [editItemDiscountCents, setEditItemDiscountCents] = useState(0);
+  const [editItemError, setEditItemError] = useState("");
   const [pendingTipAllocation, setPendingTipAllocation] = useState<{ paymentId: string; tipCents: number } | null>(null);
   const [terminalStatus, setTerminalStatus] = useState<TerminalStatus | null>(null);
   const [terminalStatusLoading, setTerminalStatusLoading] = useState(false);
@@ -2265,6 +2342,7 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
   const [terminalConfigError, setTerminalConfigError] = useState("");
   const [terminalConfigSaving, setTerminalConfigSaving] = useState(false);
   const [checkoutDraftLoaded, setCheckoutDraftLoaded] = useState(false);
+  const pairingPollInFlightRef = useRef(false);
 
   const subtotal = items.reduce((s, i) => s + i.priceCents, 0);
   const discounts = items.reduce((s, i) => s + i.discountCents, 0);
@@ -2272,6 +2350,8 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
   const total = Math.round(subtotal + tips - discounts);
   const paid = Math.round(payments.reduce((s, p) => s + p.amountCents, 0));
   const remaining = Math.max(0, total - paid);
+  const ticketEditingDisabled = mode !== "active" || loading || pendingTipAllocation !== null || (paid > 0 && remaining <= 0);
+  const editingItem = editingItemIndex !== null ? items[editingItemIndex] ?? null : null;
 
   const selectedWorker = workers.find((w) => w.id === selectedWorkerId) ?? null;
   const selectedWorkerName = selectedWorker
@@ -2497,21 +2577,28 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
   useEffect(() => {
     if (!pairingModalOpen) return;
     const pollPairing = async () => {
+      if (pairingPollInFlightRef.current) return;
+      pairingPollInFlightRef.current = true;
       try {
         updateTerminalStatus(await fetchTerminalPairStatus());
       } catch (err) {
         setPairingError(err instanceof Error ? err.message : "Unable to refresh Clover pairing status.");
+      } finally {
+        pairingPollInFlightRef.current = false;
       }
     };
-    const intervalId = window.setInterval(() => { void pollPairing(); }, 2000);
-    return () => window.clearInterval(intervalId);
+    const intervalId = window.setInterval(() => { void pollPairing(); }, 5000);
+    return () => {
+      window.clearInterval(intervalId);
+      pairingPollInFlightRef.current = false;
+    };
   }, [pairingModalOpen]);
 
   useEffect(() => {
-    if (activeMethod !== "card" || !isRealCloverTransport || terminalStatus?.connected) return;
+    if (pairingModalOpen || activeMethod !== "card" || !isRealCloverTransport || terminalStatus?.connected) return;
     const intervalId = window.setInterval(() => { void refreshTerminalStatus(); }, 3000);
     return () => window.clearInterval(intervalId);
-  }, [activeMethod, isRealCloverTransport, terminalStatus?.connected]);
+  }, [pairingModalOpen, activeMethod, isRealCloverTransport, terminalStatus?.connected]);
 
   const handleSelectWorker = (worker: Worker) => {
     setError("");
@@ -2531,6 +2618,8 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
         workerId: selectedWorkerId,
       });
       addCheckoutItemFromResult(result.saleItem, {
+        serviceId: svc.id,
+        workerId: selectedWorkerId,
         serviceName: svc.name,
         workerName: selectedWorkerName || "Worker",
         category: svc.category?.name ?? "",
@@ -2543,21 +2632,21 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
     }
   };
 
+  const saleItemIdFromResult = (saleItem: Record<string, unknown>) => (
+    saleItem && typeof saleItem === "object" && "id" in saleItem ? String(saleItem.id) : undefined
+  );
+
   const addCheckoutItemFromResult = (
     saleItem: Record<string, unknown>,
     item: Omit<CheckoutItem, "saleItemId" | "discountCents" | "tipCents">
   ) => {
-    const saleItemId =
-      saleItem && typeof saleItem === "object" && "id" in saleItem
-        ? String(saleItem.id)
-        : undefined;
     setItems((prev) => [
       ...prev,
       {
-        saleItemId,
+        saleItemId: saleItemIdFromResult(saleItem),
         ...item,
-        discountCents: 0,
-        tipCents: 0,
+        discountCents: readCents(saleItem.discountCents),
+        tipCents: readCents(saleItem.tipCents),
       },
     ]);
   };
@@ -2600,6 +2689,7 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
         priceCents: customServicePriceCents,
       });
       addCheckoutItemFromResult(result.saleItem, {
+        workerId: selectedWorkerId,
         serviceName: name,
         workerName: selectedWorkerName || "Worker",
         category,
@@ -2613,12 +2703,83 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
     }
   };
 
+  const openEditItemModal = (idx: number) => {
+    const item = items[idx];
+    if (!item) return;
+    setEditingItemIndex(idx);
+    setEditItemWorkerId(item.workerId || selectedWorkerId || workers[0]?.id || "");
+    setEditItemPriceCents(item.priceCents);
+    setEditItemDiscountCents(item.discountCents);
+    setEditItemError("");
+  };
+
+  const closeEditItemModal = () => {
+    setEditingItemIndex(null);
+    setEditItemError("");
+  };
+
+  const workerNameById = (workerId: string) => {
+    const worker = workers.find((candidate) => candidate.id === workerId);
+    return worker ? worker.displayName || worker.user?.name || "Worker" : "Worker";
+  };
+
+  const handleSaveEditedItem = async () => {
+    if (editingItemIndex === null) return;
+    const item = items[editingItemIndex];
+    if (!item || !saleId || !item.saleItemId) {
+      setEditItemError("This item cannot be edited because it has not synced with the sale ticket.");
+      return;
+    }
+    if (!editItemWorkerId) {
+      setEditItemError("Choose a worker.");
+      return;
+    }
+    if (editItemPriceCents < 0) {
+      setEditItemError("Price cannot be negative.");
+      return;
+    }
+    if (editItemDiscountCents < 0) {
+      setEditItemError("Discount cannot be negative.");
+      return;
+    }
+    if (editItemDiscountCents > editItemPriceCents) {
+      setEditItemError("Discount cannot exceed the item price.");
+      return;
+    }
+
+    setEditItemError("");
+    setLoading(true);
+    try {
+      const result = await updateSaleItem(saleId, item.saleItemId, {
+        workerId: editItemWorkerId,
+        priceCents: editItemPriceCents,
+        discountCents: editItemDiscountCents,
+      });
+      setItems((prev) => prev.map((candidate, idx) => idx === editingItemIndex ? {
+        ...candidate,
+        workerId: editItemWorkerId,
+        workerName: workerNameById(editItemWorkerId),
+        priceCents: readCents(result.saleItem.priceCents) || editItemPriceCents,
+        discountCents: readCents(result.saleItem.discountCents),
+        tipCents: readCents(result.saleItem.tipCents),
+      } : candidate));
+      closeEditItemModal();
+    } catch (err) {
+      setEditItemError(err instanceof Error ? err.message : "Failed to update sale item.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const removeItem = async (idx: number) => {
     const item = items[idx];
     if (item?.saleItemId && saleId) {
       try {
         await removeSaleItem(saleId, item.saleItemId);
-      } catch { /* ignore */ }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to remove sale item.");
+        return;
+      }
     }
     setItems(items.filter((_, i) => i !== idx));
   };
@@ -2629,6 +2790,7 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
   };
 
   const readCents = (value: unknown) => (typeof value === "number" && Number.isInteger(value) ? value : 0);
+  const readText = (value: unknown) => (typeof value === "string" && value.trim() ? value : null);
 
   const applyAllocatedTips = (saleItems: Record<string, unknown>[]) => {
     setItems((prev) => prev.map((item) => {
@@ -2662,11 +2824,14 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
 
     let recordedAmountCents = amount;
     let recordedTipCents = 0;
+    let recordedPayment: Record<string, unknown> | null = null;
 
     if (activeMethod === "cash") {
-      await addCashPayment(saleId, { amountCents: amount });
+      const result = await addCashPayment(saleId, { amountCents: amount });
+      recordedPayment = result.payment;
     } else if (activeMethod === "gift_card") {
-      await addGiftCardPayment(saleId, { amountCents: amount });
+      const result = await addGiftCardPayment(saleId, { amountCents: amount });
+      recordedPayment = result.payment;
     } else if (activeMethod === "card") {
       await prepareCardTerminal();
       const result = await addCardPayment(saleId, {
@@ -2676,6 +2841,7 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
       if (result.terminalStatus !== "approved") {
         throw new Error(paymentFailureMessage(result.payment));
       }
+      recordedPayment = result.payment;
       recordedAmountCents = readCents(result.payment.amountCents) || amount;
       recordedTipCents = readCents(result.payment.tipCents);
       const paymentId = typeof result.payment.id === "string" ? result.payment.id : "";
@@ -2686,7 +2852,18 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
       throw new Error("Select a payment method.");
     }
 
-    setPayments((prev) => [...prev, { method: activeMethod, amountCents: recordedAmountCents, tipCents: recordedTipCents }]);
+    setPayments((prev) => [...prev, {
+      id: readText(recordedPayment?.id) ?? undefined,
+      method: activeMethod,
+      amountCents: recordedAmountCents,
+      tipCents: recordedTipCents,
+      provider: readText(recordedPayment?.provider),
+      providerOrderId: readText(recordedPayment?.providerOrderId),
+      providerPaymentId: readText(recordedPayment?.providerPaymentId),
+      authCode: readText(recordedPayment?.authCode),
+      cardBrand: readText(recordedPayment?.cardBrand),
+      cardLast4: readText(recordedPayment?.cardLast4),
+    }]);
     return true;
   };
 
@@ -2987,12 +3164,26 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
                     <span className="checkout-sale-item__price">
                       {formatMoney(item.priceCents - item.discountCents)}
                     </span>
-                    <button
-                      className="checkout-sale-item__remove"
-                      onClick={() => { void removeItem(idx); }}
-                    >
-                      ✕
-                    </button>
+                    {item.discountCents > 0 && (
+                      <span className="checkout-sale-item__discount">−{formatMoney(item.discountCents)}</span>
+                    )}
+                    <div className="checkout-sale-item__actions">
+                      <button
+                        className="checkout-sale-item__edit"
+                        onClick={() => openEditItemModal(idx)}
+                        disabled={ticketEditingDisabled || !item.saleItemId}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        className="checkout-sale-item__remove"
+                        onClick={() => { void removeItem(idx); }}
+                        disabled={ticketEditingDisabled}
+                        aria-label={`Remove ${item.serviceName}`}
+                      >
+                        ✕
+                      </button>
+                    </div>
                   </div>
                 </div>
               ))}
@@ -3138,7 +3329,14 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
                 {payments.map((p, i) => (
                   <div key={i} className="payment-entry">
                     <span className="payment-entry__method">
-                      {methodLabel(p.method)}{p.tipCents ? ` · tip ${formatMoney(p.tipCents)}` : ""}
+                      {methodLabel(p.method)}{p.cardLast4 ? ` •••• ${p.cardLast4}` : ""}{p.tipCents ? ` · tip ${formatMoney(p.tipCents)}` : ""}
+                      {p.method === "card" && (p.providerOrderId || p.providerPaymentId || p.authCode) && (
+                        <small className="payment-entry__refs">
+                          {p.providerOrderId ? `Clover Sale: ${p.providerOrderId}` : "Clover Sale: -"}
+                          {p.providerPaymentId ? ` · Payment: ${p.providerPaymentId}` : ""}
+                          {p.authCode ? ` · Auth: ${p.authCode}` : ""}
+                        </small>
+                      )}
                     </span>
                     <span className="payment-entry__amount">{formatMoney(p.amountCents)}</span>
                     <button className="payment-entry__remove" onClick={() => removePayment(i)}>✕</button>
@@ -3184,6 +3382,44 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
           <button type="button" onClick={() => setAmountCents(remaining)}>Remaining</button>
         </div>
       </div>
+    </Modal>
+    <Modal
+      open={editingItem !== null}
+      onClose={closeEditItemModal}
+      title="Edit Sale Item"
+      footer={
+        <>
+          <Button variant="secondary" onClick={closeEditItemModal}>Cancel</Button>
+          <Button onClick={() => { void handleSaveEditedItem(); }} loading={loading}>Save Changes</Button>
+        </>
+      }
+    >
+      {editingItem && (
+        <div className="ticket-edit-form">
+          <p className="text-muted text-sm" style={{ marginTop: 0 }}>
+            Edit worker, price, or discount before completing the sale. Tips stay controlled by the payment terminal flow.
+          </p>
+          <Input label="Service" value={editingItem.serviceName} disabled />
+          <Select
+            label="Worker"
+            value={editItemWorkerId}
+            onChange={(event) => setEditItemWorkerId(event.target.value)}
+            options={workers.map((worker) => ({ value: worker.id, label: worker.displayName || worker.user?.name || "Worker" }))}
+          />
+          <AmountInput key={`edit-price-${editingItem.saleItemId ?? editingItemIndex}`} label="Price" valueCents={editItemPriceCents} onChangeCents={setEditItemPriceCents} />
+          <AmountInput key={`edit-discount-${editingItem.saleItemId ?? editingItemIndex}`} label="Discount" valueCents={editItemDiscountCents} onChangeCents={setEditItemDiscountCents} />
+          <div className="ticket-edit-summary">
+            <span>New item total</span>
+            <strong>{formatMoney(Math.max(0, editItemPriceCents - editItemDiscountCents))}</strong>
+          </div>
+          {paid > 0 && (
+            <p className="text-muted text-sm">
+              Approved payments already recorded: {formatMoney(paid)}. The backend will reject changes that reduce the ticket below approved payments.
+            </p>
+          )}
+          {editItemError && <p className="field__error" role="alert">{editItemError}</p>}
+        </div>
+      )}
     </Modal>
     <Modal
       open={terminalConfigOpen}
@@ -4258,6 +4494,10 @@ function formatDateTime(value: string | null) {
   return value ? new Date(value).toLocaleString() : "-";
 }
 
+function readNullableText(value: unknown) {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
 function formatCommissionRates(rates: number[], fallbackRate: number) {
   const source = rates.length > 0 ? rates : [fallbackRate];
   return source.map((rate) => `${Math.round(rate * 100)}%`).join(", ");
@@ -4316,10 +4556,26 @@ function ReportsScreen({
   const [salesSummary, setSalesSummary] = useState<SalesReportSummary | null>(null);
   const [salesTickets, setSalesTickets] = useState<SalesReportTicket[]>([]);
   const [selectedTicket, setSelectedTicket] = useState<SalesReportTicket | null>(null);
+  const [adjustmentTicket, setAdjustmentTicket] = useState<SalesReportTicket | null>(null);
+  const [adjustmentServiceId, setAdjustmentServiceId] = useState("");
+  const [adjustmentType, setAdjustmentType] = useState<"worker_correction" | "service_label_correction" | "note">("worker_correction");
+  const [adjustmentWorkerId, setAdjustmentWorkerId] = useState("");
+  const [adjustmentServiceName, setAdjustmentServiceName] = useState("");
+  const [adjustmentReason, setAdjustmentReason] = useState("");
+  const [adjustmentOwnerPin, setAdjustmentOwnerPin] = useState("");
+  const [adjustmentError, setAdjustmentError] = useState("");
+  const [adjustmentSaving, setAdjustmentSaving] = useState(false);
   const [workerEarnings, setWorkerEarnings] = useState<WorkerEarningsRow[]>([]);
   const [turnDetails, setTurnDetails] = useState<TurnDetail[]>([]);
   const [paymentSummary, setPaymentSummary] = useState<PaymentReportSummary | null>(null);
   const [paymentRows, setPaymentRows] = useState<PaymentReportRow[]>([]);
+  const [editingPaymentReference, setEditingPaymentReference] = useState<PaymentReportRow | null>(null);
+  const [referenceOrderId, setReferenceOrderId] = useState("");
+  const [referencePaymentId, setReferencePaymentId] = useState("");
+  const [referenceAuthCode, setReferenceAuthCode] = useState("");
+  const [referenceReason, setReferenceReason] = useState("");
+  const [referenceError, setReferenceError] = useState("");
+  const [referenceSaving, setReferenceSaving] = useState(false);
   const [refundSummary, setRefundSummary] = useState<{ refundTotalCents: number; refundCount: number } | null>(null);
   const [refundRows, setRefundRows] = useState<RefundReportRow[]>([]);
   const [discountSummary, setDiscountSummary] = useState<{ discountTotalCents: number; discountCount: number } | null>(null);
@@ -4416,6 +4672,112 @@ function ReportsScreen({
     setPaymentSummary(data.summary);
     setPaymentRows(data.payments);
   });
+
+  const openTicketAdjustment = (ticket: SalesReportTicket, serviceId?: string) => {
+    const service = ticket.services.find((item) => item.id === serviceId) ?? ticket.services[0] ?? null;
+    setAdjustmentTicket(ticket);
+    setAdjustmentServiceId(service?.id ?? "");
+    setAdjustmentType("worker_correction");
+    setAdjustmentWorkerId(service?.workerId ?? reportWorkers[0]?.id ?? "");
+    setAdjustmentServiceName(service?.serviceName ?? "");
+    setAdjustmentReason("");
+    setAdjustmentOwnerPin("");
+    setAdjustmentError("");
+  };
+
+  const closeTicketAdjustment = () => {
+    setAdjustmentTicket(null);
+    setAdjustmentError("");
+  };
+
+  const saveTicketAdjustment = async () => {
+    if (!adjustmentTicket) return;
+    if ((adjustmentType === "worker_correction" || adjustmentType === "service_label_correction") && !adjustmentServiceId) {
+      setAdjustmentError("Choose a service item to adjust.");
+      return;
+    }
+    if (adjustmentType === "worker_correction" && !adjustmentWorkerId) {
+      setAdjustmentError("Choose the corrected worker.");
+      return;
+    }
+    if (adjustmentType === "service_label_correction" && !adjustmentServiceName.trim()) {
+      setAdjustmentError("Enter the corrected service label.");
+      return;
+    }
+    if (!adjustmentReason.trim()) {
+      setAdjustmentError("Enter a reason for the adjustment.");
+      return;
+    }
+    if (adjustmentOwnerPin.length < 4) {
+      setAdjustmentError("Enter owner PIN.");
+      return;
+    }
+
+    setAdjustmentSaving(true);
+    setAdjustmentError("");
+    try {
+      await createSaleAdjustment(adjustmentTicket.id, {
+        saleItemId: adjustmentServiceId || undefined,
+        type: adjustmentType,
+        newWorkerId: adjustmentType === "worker_correction" ? adjustmentWorkerId : undefined,
+        serviceName: adjustmentType === "service_label_correction" ? adjustmentServiceName.trim() : undefined,
+        note: adjustmentType === "note" ? adjustmentReason.trim() : undefined,
+        reason: adjustmentReason.trim(),
+        ownerPin: adjustmentOwnerPin,
+      });
+      closeTicketAdjustment();
+      setSelectedTicket(null);
+      await loadSales();
+    } catch (error) {
+      setAdjustmentError(error instanceof Error ? error.message : "Failed to apply adjustment.");
+    } finally {
+      setAdjustmentSaving(false);
+    }
+  };
+
+  const openPaymentReferenceEditor = (payment: PaymentReportRow) => {
+    setEditingPaymentReference(payment);
+    setReferenceOrderId(payment.providerOrderId ?? "");
+    setReferencePaymentId(payment.providerPaymentId ?? "");
+    setReferenceAuthCode(payment.authCode ?? "");
+    setReferenceReason("");
+    setReferenceError("");
+  };
+
+  const closePaymentReferenceEditor = () => {
+    setEditingPaymentReference(null);
+    setReferenceError("");
+  };
+
+  const savePaymentReference = async () => {
+    if (!editingPaymentReference) return;
+    if (!referenceReason.trim()) {
+      setReferenceError("Enter a reason for the correction.");
+      return;
+    }
+    setReferenceSaving(true);
+    setReferenceError("");
+    try {
+      const result = await updatePaymentProviderReference(editingPaymentReference.id, {
+        providerOrderId: referenceOrderId.trim() || undefined,
+        providerPaymentId: referencePaymentId.trim() || undefined,
+        authCode: referenceAuthCode.trim() || undefined,
+        reason: referenceReason.trim(),
+      });
+      const updated = result.payment;
+      setPaymentRows((rows) => rows.map((row) => row.id === editingPaymentReference.id ? {
+        ...row,
+        providerOrderId: readNullableText(updated.providerOrderId),
+        providerPaymentId: readNullableText(updated.providerPaymentId),
+        authCode: readNullableText(updated.authCode),
+      } : row));
+      closePaymentReferenceEditor();
+    } catch (error) {
+      setReferenceError(error instanceof Error ? error.message : "Failed to update Clover reference.");
+    } finally {
+      setReferenceSaving(false);
+    }
+  };
 
   const loadRefunds = () => runReportLoad(async () => {
     setRefundSummary(null);
@@ -4805,6 +5167,9 @@ function ReportsScreen({
               <div className="report-ticket-detail__collected">
                 <span>Collected</span>
                 <strong>{formatMoney(selectedTicket.totals.collectedCents)}</strong>
+                <Button size="sm" variant="secondary" onClick={() => openTicketAdjustment(selectedTicket)}>
+                  Adjust Ticket
+                </Button>
               </div>
             </section>
 
@@ -4827,7 +5192,9 @@ function ReportsScreen({
                         <div><span>Net</span><strong>{formatMoney(service.finalServiceCents)}</strong></div>
                         <div><span>Tip</span><strong>{formatMoney(service.tipsCents)}</strong></div>
                       </div>
-
+                      <Button size="sm" variant="ghost" onClick={() => openTicketAdjustment(selectedTicket, service.id)}>
+                        Adjust
+                      </Button>
                     </article>
                   ))}
                 </div>
@@ -4847,6 +5214,24 @@ function ReportsScreen({
                 </div>
               </aside>
             </div>
+
+            {(selectedTicket.adjustments?.length ?? 0) > 0 && (
+              <section className="report-ticket-detail__panel">
+                <div className="report-ticket-detail__section-header">
+                  <h3>Adjustment History</h3>
+                  <Badge variant="default">{selectedTicket.adjustments?.length ?? 0}</Badge>
+                </div>
+                <div className="ticket-adjustment-history">
+                  {(selectedTicket.adjustments ?? []).map((adjustment) => (
+                    <article key={adjustment.id}>
+                      <strong>{adjustment.type.replace(/_/g, " ")}</strong>
+                      <span>{adjustment.reason}</span>
+                      <small>{formatDateTime(adjustment.createdAt)}</small>
+                    </article>
+                  ))}
+                </div>
+              </section>
+            )}
 
             <section className="report-ticket-detail__panel">
               <div className="report-ticket-detail__section-header">
@@ -4875,6 +5260,65 @@ function ReportsScreen({
       {activeReport === "sales" && !salesSummary && !loading && !reportError && (
         <EmptyState icon="-" title="No sales data" description="Try adjusting the date range." />
       )}
+
+      <Modal
+        open={adjustmentTicket !== null}
+        onClose={closeTicketAdjustment}
+        title="Adjust Finished Ticket"
+        footer={
+          <>
+            <Button variant="secondary" onClick={closeTicketAdjustment}>Cancel</Button>
+            <Button onClick={() => { void saveTicketAdjustment(); }} loading={adjustmentSaving}>Apply Adjustment</Button>
+          </>
+        }
+      >
+        {adjustmentTicket && (
+          <div className="ticket-adjustment-form">
+            <p className="text-muted text-sm" style={{ marginTop: 0 }}>
+              This records an audited correction for reports. It does not change payment amounts, tips, or Clover status.
+            </p>
+            <Select
+              label="Adjustment Type"
+              value={adjustmentType}
+              onChange={(event) => setAdjustmentType(event.target.value as typeof adjustmentType)}
+              options={[
+                { value: "worker_correction", label: "Worker correction" },
+                { value: "service_label_correction", label: "Service label correction" },
+                { value: "note", label: "Note only" },
+              ]}
+            />
+            {adjustmentType !== "note" && (
+              <Select
+                label="Service Item"
+                value={adjustmentServiceId}
+                onChange={(event) => {
+                  const service = adjustmentTicket.services.find((item) => item.id === event.target.value);
+                  setAdjustmentServiceId(event.target.value);
+                  if (service) {
+                    setAdjustmentWorkerId(service.workerId);
+                    setAdjustmentServiceName(service.serviceName);
+                  }
+                }}
+                options={adjustmentTicket.services.map((service) => ({ value: service.id, label: `${service.serviceName} — ${service.workerName}` }))}
+              />
+            )}
+            {adjustmentType === "worker_correction" && (
+              <Select
+                label="Correct Worker"
+                value={adjustmentWorkerId}
+                onChange={(event) => setAdjustmentWorkerId(event.target.value)}
+                options={reportWorkers.map((worker) => ({ value: worker.id, label: workerDisplayName(worker) }))}
+              />
+            )}
+            {adjustmentType === "service_label_correction" && (
+              <Input label="Correct Service Label" value={adjustmentServiceName} onChange={(event) => setAdjustmentServiceName(event.target.value)} />
+            )}
+            <Input label="Reason" value={adjustmentReason} onChange={(event) => setAdjustmentReason(event.target.value)} placeholder="Wrong worker selected at checkout" />
+            <Input label="Owner PIN" type="password" value={adjustmentOwnerPin} onChange={(event) => setAdjustmentOwnerPin(event.target.value.replace(/\D/g, "").slice(0, 6))} inputMode="numeric" maxLength={6} />
+            {adjustmentError && <p className="field__error" role="alert">{adjustmentError}</p>}
+          </div>
+        )}
+      </Modal>
 
       {activeReport === "workers" && (
         <section className="report-section">
@@ -4994,18 +5438,25 @@ function ReportsScreen({
               <div className="table-wrap">
                 <table>
                   <thead>
-                    <tr><th>Time</th><th>Customer</th><th>Method</th><th>Provider</th><th>Status</th><th>Tip</th><th>Amount</th></tr>
+                    <tr><th>Time</th><th>Customer</th><th>Method</th><th>Clover Sale</th><th>Clover Payment</th><th>Auth</th><th>Status</th><th>Tip</th><th>Amount</th><th></th></tr>
                   </thead>
                   <tbody>
                     {paymentRows.map((payment) => (
                       <tr key={payment.id}>
                         <td>{formatDateTime(payment.createdAt)}</td>
                         <td>{payment.customerName}</td>
-                        <td>{methodLabel(payment.method)}</td>
-                        <td>{payment.provider ?? "-"}</td>
+                        <td>{methodLabel(payment.method)}{payment.cardLast4 ? ` •••• ${payment.cardLast4}` : ""}</td>
+                        <td>{payment.providerOrderId ?? "-"}</td>
+                        <td>{payment.providerPaymentId ?? payment.provider ?? "-"}</td>
+                        <td>{payment.authCode ?? "-"}</td>
                         <td><StatusPill status={payment.status} /></td>
                         <td>{formatMoney(payment.tipCents)}</td>
                         <td><strong>{formatMoney(payment.amountCents)}</strong></td>
+                        <td>
+                          {payment.method === "card" && (
+                            <Button size="sm" variant="ghost" onClick={() => openPaymentReferenceEditor(payment)}>Edit ID</Button>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -5123,6 +5574,32 @@ function ReportsScreen({
       {activeReport === "eod" && !eodData && !loading && !reportError && (
         <EmptyState icon="-" title="No EOD data" description="Try adjusting the date range." />
       )}
+      <Modal
+        open={editingPaymentReference !== null}
+        onClose={closePaymentReferenceEditor}
+        title="Edit Clover Reference"
+        footer={
+          <>
+            <Button variant="secondary" onClick={closePaymentReferenceEditor}>Cancel</Button>
+            <Button onClick={() => { void savePaymentReference(); }} loading={referenceSaving}>Save Reference</Button>
+          </>
+        }
+      >
+        {editingPaymentReference && (
+          <div className="clover-reference-form">
+            <p className="text-muted text-sm" style={{ marginTop: 0 }}>
+              Use this to match the POS ticket to Clover after end-of-day review. Amounts, status, and tips are not changed.
+            </p>
+            <Input label="POS Ticket / Sale ID" value={editingPaymentReference.saleId} disabled />
+            <Input label="Clover Sale / Order ID" value={referenceOrderId} onChange={(event) => setReferenceOrderId(event.target.value)} placeholder="Clover order or sale number" />
+            <Input label="Clover Payment ID" value={referencePaymentId} onChange={(event) => setReferencePaymentId(event.target.value)} placeholder="Clover payment reference" />
+            <Input label="Auth Code" value={referenceAuthCode} onChange={(event) => setReferenceAuthCode(event.target.value)} placeholder="Auth/reference code" />
+            <Input label="Correction Reason" value={referenceReason} onChange={(event) => setReferenceReason(event.target.value)} placeholder="Compared against Clover batch" />
+            <p className="field__hint">Changing the Clover Payment ID can affect refund/reconciliation matching. Verify against Clover before saving.</p>
+            {referenceError && <p className="field__error" role="alert">{referenceError}</p>}
+          </div>
+        )}
+      </Modal>
     </>
   );
 }

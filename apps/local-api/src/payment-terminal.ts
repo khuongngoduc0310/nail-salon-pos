@@ -84,6 +84,10 @@ export class RuntimePaymentTerminalManager implements PaymentTerminalAdapter {
     return this.activeAdapter.verifyConnection();
   }
 
+  getCachedConnectionStatus(): TerminalConnectionStatus | undefined {
+    return this.activeAdapter.getCachedConnectionStatus?.();
+  }
+
   startSale(input: TerminalSaleRequest): Promise<TerminalPaymentResult> {
     return this.activeAdapter.startSale(input);
   }
@@ -105,7 +109,15 @@ export class CloverTerminalAdapter implements PaymentTerminalAdapter {
   constructor(private readonly clover: CloverPaymentAdapter) {}
 
   async verifyConnection(): Promise<TerminalConnectionStatus> {
-    const status = await this.clover.verifyConnection();
+    return this.mapConnectionStatus(await this.clover.verifyConnection());
+  }
+
+  getCachedConnectionStatus(): TerminalConnectionStatus | undefined {
+    const status = this.clover.getCachedConnectionStatus?.();
+    return status ? this.mapConnectionStatus(status) : undefined;
+  }
+
+  private mapConnectionStatus(status: Awaited<ReturnType<CloverPaymentAdapter["verifyConnection"]>>): TerminalConnectionStatus {
     return {
       connected: status.connected,
       provider: "clover",

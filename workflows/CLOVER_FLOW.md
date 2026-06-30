@@ -36,9 +36,10 @@ Owner POS Checkout also includes a Clover connection settings panel. The owner c
    - `declined`
    - `cancelled`
    - `failed`
-8. POS stores Clover payment ID/reference when approved.
-9. If Clover returned a tip, Owner POS prompts the owner to allocate it either evenly between workers or by discounted service amount percentage. Even worker splits are automatically distributed across that worker's services by discounted service amount percentage.
-10. Sale completes only if total paid is enough after allocated tips are included.
+8. POS stores Clover payment ID/reference when approved, including safe Clover sale/order ID when the adapter returns it.
+9. Owner can view safe Clover matching references in the Payments report: POS ticket ID, Clover sale/order ID, Clover payment ID, auth code, brand, and last 4. If Clover batch review shows a mismatch, owner may correct only the safe reference IDs/auth code with a reason; amounts, tips, status, and card data are not editable through that correction.
+10. If Clover returned a tip, Owner POS prompts the owner to allocate it either evenly between workers or by discounted service amount percentage. Even worker splits are automatically distributed across that worker's services by discounted service amount percentage.
+11. Sale completes only if total paid is enough after allocated tips are included.
 
 ## Split payments
 
@@ -82,6 +83,7 @@ Must handle:
 Store only safe metadata:
 
 - Provider payment ID.
+- Provider sale/order ID.
 - Card brand.
 - Last 4.
 - Auth/reference code.

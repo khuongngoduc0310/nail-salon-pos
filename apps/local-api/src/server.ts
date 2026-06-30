@@ -70,7 +70,7 @@ export async function buildServer(options: ServerOptions = {}) {
     const body = request.body as { pairingCode?: unknown } | undefined;
     return confirmTerminalPairing(terminal, typeof body?.pairingCode === "string" ? body.pairingCode : "");
   });
-  app.get("/api/terminal/pair/status", async () => readTerminalStatus(terminal));
+  app.get("/api/terminal/pair/status", async () => readTerminalPairStatus(terminal));
   app.post("/api/terminal/mock/approved", async () => {
     terminal.setMockApproved();
     return { nextStatus: "approved" };
@@ -107,6 +107,23 @@ export async function buildServer(options: ServerOptions = {}) {
 async function readTerminalStatus(terminal: RuntimePaymentTerminalManager) {
   const status = await terminal.verifyConnection();
   const mockPairing = await readMockCloverPairingStatus(terminal);
+  if (!mockPairing) return status;
+  return {
+    ...status,
+    connected: status.connected && mockPairing.paired,
+    pairingRequired: !mockPairing.paired,
+    pairingCode: undefined,
+    message: mockPairing.paired
+      ? status.message
+      : mockPairing.pairingCode
+        ? "Enter the pairing code shown on the mock Clover device"
+        : "Mock Clover device is not paired",
+  };
+}
+
+async function readTerminalPairStatus(terminal: RuntimePaymentTerminalManager) {
+  const mockPairing = await readMockCloverPairingStatus(terminal);
+  const status = terminal.getCachedConnectionStatus() ?? await terminal.verifyConnection();
   if (!mockPairing) return status;
   return {
     ...status,

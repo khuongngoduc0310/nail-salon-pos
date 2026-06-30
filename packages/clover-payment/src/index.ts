@@ -83,6 +83,7 @@ export type CloverReconciliationResult = {
 
 export interface CloverPaymentAdapter {
   verifyConnection(): Promise<CloverConnectionStatus>;
+  getCachedConnectionStatus?(): CloverConnectionStatus;
   startCardSale(input: CloverCardSaleRequest): Promise<CloverCardSaleResult>;
   cancelCurrentPayment(): Promise<void>;
   refund(input: CloverRefundRequest): Promise<CloverRefundResult>;
@@ -391,20 +392,7 @@ export class CloverRemotePayLanAdapter implements CloverPaymentAdapter {
   async verifyConnection(): Promise<CloverConnectionStatus> {
     try {
       this.ensureConnector();
-      const label = this.config.transport === "ws-cloud" ? "Cloud" : "LAN";
-      return {
-        connected: this.connected,
-        provider: "clover",
-        transport: this.config.transport,
-        deviceId: this.getStatusDeviceId(),
-        pairingRequired: this.pairingRequired,
-        pairingCode: this.pairingCode,
-        message: this.connected
-          ? `Clover Remote Pay ${label} device ready`
-          : this.pairingCode
-            ? `Enter pairing code ${this.pairingCode} on the Clover device`
-            : `Clover Remote Pay ${label} connection initializing`,
-      };
+      return this.getCachedConnectionStatus();
     } catch (error) {
       const label = this.config.transport === "ws-cloud" ? "Cloud" : "LAN";
       return {
@@ -415,6 +403,26 @@ export class CloverRemotePayLanAdapter implements CloverPaymentAdapter {
         message: error instanceof Error ? error.message : `Clover Remote Pay ${label} connection failed`,
       };
     }
+  }
+
+  getCachedConnectionStatus(): CloverConnectionStatus {
+    const label = this.config.transport === "ws-cloud" ? "Cloud" : "LAN";
+    const connectionStarted = Boolean(this.connector);
+    return {
+      connected: this.connected,
+      provider: "clover",
+      transport: this.config.transport,
+      deviceId: this.getStatusDeviceId(),
+      pairingRequired: this.pairingRequired,
+      pairingCode: this.pairingCode,
+      message: this.connected
+        ? `Clover Remote Pay ${label} device ready`
+        : this.pairingCode
+          ? `Enter pairing code ${this.pairingCode} on the Clover device`
+          : connectionStarted
+            ? `Clover Remote Pay ${label} connection initializing`
+            : `Clover Remote Pay ${label} connection not started`,
+    };
   }
 
   async startCardSale(input: CloverCardSaleRequest): Promise<CloverCardSaleResult> {

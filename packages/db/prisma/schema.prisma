@@ -11,6 +11,8 @@ enum UserRole {
   owner
   worker
   customer
+
+  @@map("user_role")
 }
 
 enum WorkerStatus {
@@ -19,6 +21,8 @@ enum WorkerStatus {
   on_break
   off_today
   appointment_only
+
+  @@map("worker_status")
 }
 
 enum CheckinStatus {
@@ -29,6 +33,8 @@ enum CheckinStatus {
   paid
   cancelled
   no_show
+
+  @@map("checkin_status")
 }
 
 enum AppointmentStatus {
@@ -39,6 +45,8 @@ enum AppointmentStatus {
   completed
   cancelled
   no_show
+
+  @@map("appointment_status")
 }
 
 enum TurnStatus {
@@ -47,6 +55,8 @@ enum TurnStatus {
   completed
   skipped
   cancelled
+
+  @@map("turn_status")
 }
 
 enum TurnType {
@@ -54,6 +64,8 @@ enum TurnType {
   appointment
   requested_worker
   manual
+
+  @@map("turn_type")
 }
 
 enum SaleStatus {
@@ -63,12 +75,16 @@ enum SaleStatus {
   paid
   refunded
   voided
+
+  @@map("sale_status")
 }
 
 enum SaleItemStatus {
   active
   refunded
   voided
+
+  @@map("sale_item_status")
 }
 
 enum PaymentMethod {
@@ -76,6 +92,8 @@ enum PaymentMethod {
   card
   gift_card
   other
+
+  @@map("payment_method")
 }
 
 enum PaymentStatus {
@@ -85,17 +103,31 @@ enum PaymentStatus {
   cancelled
   failed
   refunded
+
+  @@map("payment_status")
 }
 
 enum DiscountType {
   amount
   percent
+
+  @@map("discount_type")
+}
+
+enum SaleAdjustmentType {
+  worker_correction
+  service_label_correction
+  note
+
+  @@map("sale_adjustment_type")
 }
 
 enum GiftCardStatus {
   active
   disabled
   expired
+
+  @@map("gift_card_status")
 }
 
 enum GiftCardTxType {
@@ -103,11 +135,15 @@ enum GiftCardTxType {
   redeem
   refund
   adjustment
+
+  @@map("gift_card_tx_type")
 }
 
 enum SessionStatus {
   open
   closed
+
+  @@map("session_status")
 }
 
 model User {
@@ -153,7 +189,7 @@ model Worker {
 model Customer {
   id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   name      String
-  phone     String?
+  phone     String   @unique
   email     String?
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
   updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz
@@ -318,6 +354,7 @@ model Sale {
   refunds     Refund[]
   discounts   Discount[]
   receipts    Receipt[]
+  adjustments SaleAdjustment[]
   session     Session?   @relation(fields: [sessionId], references: [id])
   sessionId   String?    @map("session_id") @db.Uuid
 
@@ -347,10 +384,30 @@ model SaleItem {
   sale      Sale       @relation(fields: [saleId], references: [id], onDelete: Cascade)
   service   Service?   @relation(fields: [serviceId], references: [id])
   worker    Worker     @relation(fields: [workerId], references: [id])
-  discounts Discount[]
+  discounts   Discount[]
+  adjustments SaleAdjustment[]
 
   @@index([workerId])
   @@map("sale_items")
+}
+
+model SaleAdjustment {
+  id                String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  saleId            String             @map("sale_id") @db.Uuid
+  saleItemId        String?            @map("sale_item_id") @db.Uuid
+  type              SaleAdjustmentType
+  previousValueJson Json               @map("previous_value_json") @db.JsonB
+  newValueJson      Json               @map("new_value_json") @db.JsonB
+  reason            String
+  approvedByUserId  String?            @map("approved_by_user_id") @db.Uuid
+  createdAt         DateTime           @default(now()) @map("created_at") @db.Timestamptz
+
+  sale     Sale      @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  saleItem SaleItem? @relation(fields: [saleItemId], references: [id], onDelete: SetNull)
+
+  @@index([saleId])
+  @@index([saleItemId])
+  @@map("sale_adjustments")
 }
 
 model Payment {

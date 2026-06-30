@@ -169,10 +169,14 @@ Checkout supports:
 - Multiple services.
 - Multiple workers on one sale.
 - One-time custom checkout services with owner-entered name and price; these are temporary sale items and are not added to the service catalog.
+- Manual tickets for immediate walk-in checkout without a customer check-in, using owner-selected workers and catalog/custom services.
+- Ticket correction before sale completion: owner may add services, void active service items, change assigned worker, or adjust item price/discount. Completed, paid, refunded, or voided sales use refund/adjustment workflows instead of direct item edits.
+- Finished-ticket adjustment audit: owner may correct wrong worker attribution, service label, or add an internal note on a paid ticket with owner PIN and reason. Adjustments preserve original sale/payment rows and are applied as reporting overlays.
 - Discount per sale or sale item.
 - Tips must not be determined or prefilled when sale items are added; Clover/payment-terminal tip flow determines any card tip after the sale is sent for payment. When Clover returns a card tip, Owner POS prompts the owner to allocate it either evenly between workers or by percentage of discounted service amount. If split evenly between workers, each worker's share is automatically distributed across that worker's services by percentage of discounted service amount. Approved allocated tips are attributed to sale items for worker/service reporting.
 - Printed receipt.
 - Refund tracking.
+- Clover card ticket matching: Owner POS displays POS ticket ID, Clover sale/order ID, Clover payment ID, auth code, card brand, and last 4 when available. Owner may correct only safe Clover reference IDs/auth code with a reason for end-of-day matching; amounts, tips, status, and sensitive card data are not editable.
 - Date/time reporting.
 
 Split payment example:

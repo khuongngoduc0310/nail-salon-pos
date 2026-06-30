@@ -58,6 +58,7 @@ export type ReconciliationResult = {
 
 export interface PaymentTerminalAdapter {
   verifyConnection(): Promise<TerminalConnectionStatus>;
+  getCachedConnectionStatus?(): TerminalConnectionStatus | undefined;
   startSale(input: TerminalSaleRequest): Promise<TerminalPaymentResult>;
   cancelCurrentAction(): Promise<void>;
   refund(input: TerminalRefundRequest): Promise<TerminalRefundResult>;

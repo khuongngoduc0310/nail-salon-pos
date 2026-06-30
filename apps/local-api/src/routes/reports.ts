@@ -13,7 +13,6 @@ export async function registerReportRoutes(app: FastifyInstance, db: DbClient) {
         where: {
           completedAt: buildDateRange(start, end),
           ...(paymentMethod ? { payments: { some: { method: paymentMethod } } } : {}),
-          ...(workerId ? { items: { some: { workerId } } } : {}),
           status: { in: ["paid", "refunded"] },
         },
         include: {
@@ -21,6 +20,7 @@ export async function registerReportRoutes(app: FastifyInstance, db: DbClient) {
           payments: true,
           customer: true,
           refunds: true,
+          adjustments: true,
         },
         orderBy: { completedAt: "desc" },
       });
@@ -44,26 +44,29 @@ export async function registerReportRoutes(app: FastifyInstance, db: DbClient) {
         },
       });
 
-      const earnings = [];
-      for (const w of workers) {
-        const items = await (db as any).saleItem.findMany({
-          where: {
-            workerId: w.id,
-            sale: {
-              completedAt: buildDateRange(start, end),
-              status: { in: ["paid", "refunded"] },
-            },
-          },
-        });
+      const sales = await (db as any).sale.findMany({
+        where: {
+          completedAt: buildDateRange(start, end),
+          status: { in: ["paid", "refunded"] },
+        },
+        include: {
+          items: { include: { worker: { include: { user: true } } } },
+          adjustments: true,
+        },
+      });
 
-        const paidItems = items.filter(isReportableSaleItem);
+      const earnings = workers.map((w: any) => {
+        const paidItems = sales.flatMap((sale: any) => (sale.items || [])
+          .filter(isReportableSaleItem)
+          .map((item: any) => applyItemAdjustments(item, sale.adjustments || []))
+          .filter((item: any) => item.workerId === w.id));
         const netSales = paidItems.reduce((sum: number, i: any) => sum + getFinalServiceCents(i), 0);
         const commission = paidItems.reduce((sum: number, i: any) => sum + getCommissionCents(i), 0);
         const tips = paidItems.reduce((sum: number, i: any) => sum + cents(i.tipCents), 0);
         const commissionRates = Array.from(new Set<number>(paidItems.map((item: any) => getCommissionRateSnapshot(item, w))))
           .sort((a: number, b: number) => a - b);
 
-        earnings.push({
+        return {
           workerId: w.id,
           name: w.displayName || w.user?.name,
           services: paidItems.length,
@@ -73,8 +76,8 @@ export async function registerReportRoutes(app: FastifyInstance, db: DbClient) {
           commissionRates,
           tipsCents: tips,
           totalPayCents: commission + tips,
-        });
-      }
+        };
+      });
 
       return { workers: earnings };
     } catch (error) {
@@ -181,7 +184,11 @@ export async function registerReportRoutes(app: FastifyInstance, db: DbClient) {
           customerName: payment.sale?.customer?.name ?? "Walk-in",
           method: payment.method,
           provider: payment.provider ?? null,
+          providerOrderId: payment.providerOrderId ?? null,
           providerPaymentId: payment.providerPaymentId ?? null,
+          authCode: payment.authCode ?? null,
+          cardBrand: payment.cardBrand ?? null,
+          cardLast4: payment.cardLast4 ?? null,
           amountCents: cents(payment.amountCents),
           tipCents: cents(payment.tipCents),
           status: payment.status,
@@ -434,7 +441,8 @@ function buildTicketSalesReport(sales: any[], workerId?: string) {
 }
 
 function buildTicketReport(sale: any, workerId?: string) {
-  const activeItems = (sale.items || []).filter(isReportableSaleItem);
+  const adjustments = sale.adjustments || [];
+  const activeItems = (sale.items || []).filter(isReportableSaleItem).map((item: any) => applyItemAdjustments(item, adjustments));
   const reportItems = workerId
     ? activeItems.filter((item: any) => item.workerId === workerId)
     : activeItems;
@@ -453,7 +461,7 @@ function buildTicketReport(sale: any, workerId?: string) {
       id: item.id,
       serviceName: item.serviceNameSnapshot,
       workerId: item.workerId,
-      workerName: item.worker?.displayName || item.worker?.user?.name || "Worker",
+      workerName: item.workerName ?? (item.worker?.displayName || item.worker?.user?.name || "Worker"),
       priceCents,
       discountCents,
       finalServiceCents,
@@ -486,6 +494,7 @@ function buildTicketReport(sale: any, workerId?: string) {
     customerName: sale.customer?.name ?? "Walk-in",
     paymentMethods: Array.from(new Set(approvedPayments.map((payment: any) => payment.method))),
     services: serviceLines,
+    adjustments: adjustments.map(toAdjustmentReport),
     totals: {
       grossServiceCents,
       discountCents,
@@ -500,6 +509,50 @@ function buildTicketReport(sale: any, workerId?: string) {
       collectedCents,
     },
   };
+}
+
+function applyItemAdjustments(item: any, adjustments: any[]) {
+  const related = adjustments
+    .filter((adjustment) => adjustment.saleItemId === item.id)
+    .sort((a, b) => new Date(a.createdAt ?? 0).getTime() - new Date(b.createdAt ?? 0).getTime());
+  return related.reduce((current, adjustment) => {
+    const nextValue = safeObject(adjustment.newValueJson);
+    if (adjustment.type === "worker_correction") {
+      return {
+        ...current,
+        workerId: readString(nextValue.workerId) ?? current.workerId,
+        workerName: readString(nextValue.workerName) ?? current.workerName,
+        commissionRateSnapshot: typeof nextValue.commissionRateSnapshot === "number" ? nextValue.commissionRateSnapshot : current.commissionRateSnapshot,
+      };
+    }
+    if (adjustment.type === "service_label_correction") {
+      return {
+        ...current,
+        serviceNameSnapshot: readString(nextValue.serviceName) ?? current.serviceNameSnapshot,
+      };
+    }
+    return current;
+  }, item);
+}
+
+function toAdjustmentReport(adjustment: any) {
+  return {
+    id: adjustment.id,
+    saleItemId: adjustment.saleItemId ?? null,
+    type: adjustment.type,
+    previousValue: safeObject(adjustment.previousValueJson),
+    newValue: safeObject(adjustment.newValueJson),
+    reason: adjustment.reason,
+    createdAt: adjustment.createdAt,
+  };
+}
+
+function safeObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function readString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value : undefined;
 }
 
 function isReportableSaleItem(item: any) {

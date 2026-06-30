@@ -340,12 +340,23 @@ export type SalesReportService = {
   payCents: number;
 };
 
+export type SalesReportAdjustment = {
+  id: string;
+  saleItemId: string | null;
+  type: string;
+  previousValue: Record<string, unknown>;
+  newValue: Record<string, unknown>;
+  reason: string;
+  createdAt: string;
+};
+
 export type SalesReportTicket = {
   id: string;
   completedAt: string | null;
   customerName: string;
   paymentMethods: string[];
   services: SalesReportService[];
+  adjustments?: SalesReportAdjustment[];
   totals: {
     grossServiceCents: number;
     discountCents: number;
@@ -394,7 +405,11 @@ export type PaymentReportRow = {
   customerName: string;
   method: string;
   provider: string | null;
+  providerOrderId: string | null;
   providerPaymentId: string | null;
+  authCode: string | null;
+  cardBrand: string | null;
+  cardLast4: string | null;
   amountCents: number;
   tipCents: number;
   status: string;
@@ -541,6 +556,9 @@ export async function addSaleItem(saleId: string, data: { serviceId?: string; wo
 export async function removeSaleItem(saleId: string, itemId: string): Promise<unknown> {
   return fetchJson(`/sales/${saleId}/items/${itemId}`, { method: "DELETE" });
 }
+export async function updateSaleItem(saleId: string, itemId: string, data: { workerId?: string; priceCents?: number; discountCents?: number }): Promise<{ saleItem: Record<string, unknown>; sale: Record<string, unknown> }> {
+  return fetchJson(`/sales/${saleId}/items/${itemId}`, { method: "PATCH", body: JSON.stringify(data) });
+}
 export async function addCashPayment(saleId: string, data: { amountCents: number }): Promise<{ payment: Record<string, unknown>; sale: Record<string, unknown> }> {
   return fetchJson(`/sales/${saleId}/payments/cash`, { method: "POST", body: JSON.stringify(data) });
 }
@@ -553,6 +571,12 @@ export async function addCardPayment(saleId: string, data: { amountCents: number
 
 export async function reconcileCardPayment(paymentId: string): Promise<{ payment: Record<string, unknown>; sale?: Record<string, unknown> | null; terminalStatus: string }> {
   return fetchJson(`/payments/${paymentId}/reconcile`, { method: "POST" });
+}
+export async function updatePaymentProviderReference(paymentId: string, data: { providerOrderId?: string; providerPaymentId?: string; authCode?: string; reason: string }): Promise<{ payment: Record<string, unknown> }> {
+  return fetchJson(`/payments/${paymentId}/provider-reference`, { method: "PATCH", body: JSON.stringify(data) });
+}
+export async function createSaleAdjustment(saleId: string, data: { saleItemId?: string; type: "worker_correction" | "service_label_correction" | "note"; newWorkerId?: string; serviceName?: string; note?: string; reason: string; ownerPin: string }): Promise<{ adjustment: Record<string, unknown> }> {
+  return fetchJson(`/sales/${saleId}/adjustments`, { method: "POST", body: JSON.stringify(data) });
 }
 export type TerminalStatus = {
   connected: boolean;

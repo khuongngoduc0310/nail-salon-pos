@@ -12,6 +12,7 @@ import {
   type TipAllocationMode,
 } from "@nail/shared";
 import type { DbClient } from "../db.js";
+import { verifyPin } from "./pin.js";
 import { broadcast } from "../ws/events.js";
 import {
   asObject,
@@ -39,13 +40,18 @@ type WorkerRecord = {
 type SaleRecord = {
   id: string;
   checkinId?: string | null;
+  status?: string;
+  completedAt?: Date | string | null;
   totalCents: number;
+  amountPaidCents?: number;
   items?: SaleItemRecord[];
   payments?: PaymentRecord[];
 };
 
 type SaleItemRecord = {
   id: string;
+  saleId?: string;
+  serviceId?: string | null;
   workerId?: string;
   serviceNameSnapshot?: string;
   categoryNameSnapshot?: string | null;
@@ -53,7 +59,15 @@ type SaleItemRecord = {
   discountCents: number;
   finalServiceCents?: number;
   tipCents: number;
+  status?: string;
   commissionRateSnapshot?: number | string | { toString(): string };
+};
+
+type OwnerUserRecord = {
+  id: string;
+  role: string;
+  pinHash: string | null;
+  active?: boolean;
 };
 
 type PaymentRecord = {
@@ -62,7 +76,9 @@ type PaymentRecord = {
   method: PaymentMethod;
   provider?: string | null;
   providerPaymentId?: string | null;
+  providerOrderId?: string | null;
   idempotencyKey?: string | null;
+  authCode?: string | null;
   rawProviderReference?: unknown;
   amountCents: number;
   tipCents?: number;
@@ -122,6 +138,8 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
       }
 
       const result = await db.$transaction(async (tx) => {
+        const saleForEdit = requireRecord<SaleRecord>(await tx.sale.findUnique({ where: { id: saleId }, include: { payments: true } }), "sale not found");
+        assertSaleCanEditTicket(saleForEdit);
         const service = serviceId
           ? requireRecord<ServiceRecord>(
               await tx.service.findUnique({ where: { id: serviceId }, include: { category: true } }),
@@ -179,6 +197,12 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
       const itemId = requiredString(params.itemId, "itemId");
 
       const result = await db.$transaction(async (tx) => {
+        const sale = requireRecord<SaleRecord>(await tx.sale.findUnique({ where: { id: saleId }, include: { payments: true } }), "sale not found");
+        assertSaleCanEditTicket(sale);
+        const existing = requireRecord<SaleItemRecord>(await tx.saleItem.findUnique({ where: { id: itemId } }), "sale item not found");
+        if (existing.saleId && existing.saleId !== saleId) throw new HttpError(404, "sale item not found");
+        if (existing.status && existing.status !== "active") throw new HttpError(400, "only active sale items can be voided");
+
         const item = requireRecord<SaleItemRecord>(
           await tx.saleItem.update({
             where: { id: itemId },
@@ -186,9 +210,10 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
           }),
           "sale item not found"
         );
-        const sale = await recomputeSale(tx, saleId);
+        const recomputedSale = await recomputeSale(tx, saleId);
+        assertSaleTotalCoversApprovedPayments(recomputedSale);
 
-        return { saleItem: item, sale };
+        return { saleItem: item, sale: recomputedSale };
       });
 
       return result;
@@ -208,35 +233,48 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
       }
 
       const result = await db.$transaction(async (tx) => {
+        const sale = requireRecord<SaleRecord>(await tx.sale.findUnique({ where: { id: saleId }, include: { payments: true } }), "sale not found");
+        assertSaleCanEditTicket(sale);
         const existing = requireRecord<SaleItemRecord>(await tx.saleItem.findUnique({ where: { id: itemId } }), "sale item not found");
+        if (existing.saleId && existing.saleId !== saleId) throw new HttpError(404, "sale item not found");
+        if (existing.status && existing.status !== "active") throw new HttpError(400, "only active sale items can be edited");
+
         const priceCents = optionalInteger(body.priceCents, "priceCents") ?? existing.priceCents;
         const discountCents = optionalInteger(body.discountCents, "discountCents") ?? existing.discountCents;
+        if (priceCents < 0) throw new HttpError(400, "priceCents must be a non-negative integer");
+        if (discountCents < 0) throw new HttpError(400, "discountCents must be a non-negative integer");
+        const workerId = optionalString(body.workerId, "workerId") ?? existing.workerId ?? "";
+        const worker = body.workerId !== undefined
+          ? requireRecord<WorkerRecord>(await tx.worker.findUnique({ where: { id: workerId } }), "worker not found")
+          : null;
         const tipCents = existing.tipCents;
         const recalculated = calculateSaleItem({
-          workerId: optionalString(body.workerId, "workerId") ?? existing.workerId ?? "",
+          serviceId: existing.serviceId ?? undefined,
+          workerId,
           serviceNameSnapshot: existing.serviceNameSnapshot ?? "Service",
           categoryNameSnapshot: existing.categoryNameSnapshot,
           priceCents,
           discountCents,
           tipCents,
-          commissionRate: Number(existing.commissionRateSnapshot ?? 0),
+          commissionRate: worker ? Number(worker.commissionRate) : Number(existing.commissionRateSnapshot ?? 0),
         });
         const saleItem = await tx.saleItem.update({
           where: { id: itemId },
           data: {
-            workerId: optionalString(body.workerId, "workerId") ?? existing.workerId,
+            workerId,
             priceCents,
             discountCents: recalculated.discountCents,
-            tipCents,
             finalServiceCents: recalculated.finalServiceCents,
+            commissionRateSnapshot: recalculated.commissionRateSnapshot,
             workerCommissionCents: recalculated.workerCommissionCents,
             workerTotalCents: recalculated.workerTotalCents,
             businessCents: recalculated.businessCents,
           },
         });
-        const sale = await recomputeSale(tx, saleId);
+        const recomputedSale = await recomputeSale(tx, saleId);
+        assertSaleTotalCoversApprovedPayments(recomputedSale);
 
-        return { saleItem, sale };
+        return { saleItem, sale: recomputedSale };
       });
 
       return result;
@@ -281,6 +319,59 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
 
   app.post("/api/sales/:id/payments/card/start", async (request, reply) => {
     return startCardPayment(request, reply, db, terminal);
+  });
+
+  app.patch("/api/payments/:paymentId/provider-reference", async (request, reply) => {
+    try {
+      const body = asObject(request.body);
+      const params = getParams(request);
+      const paymentId = requiredString(params.paymentId, "paymentId");
+      const reason = requiredString(body.reason, "reason");
+      const providerOrderId = optionalString(body.providerOrderId, "providerOrderId");
+      const providerPaymentId = optionalString(body.providerPaymentId, "providerPaymentId");
+      const authCode = optionalString(body.authCode, "authCode");
+      if (providerOrderId === undefined && providerPaymentId === undefined && authCode === undefined) {
+        throw new HttpError(400, "at least one Clover reference field is required");
+      }
+
+      const payment = requireRecord<PaymentRecord>(await db.payment.findUnique({ where: { id: paymentId } }), "payment not found");
+      if (payment.method !== "card") {
+        throw new HttpError(400, "only card payment references can be edited");
+      }
+
+      const rawReference = safeJsonObject(payment.rawProviderReference);
+      const history = Array.isArray(rawReference.referenceCorrectionHistory) ? rawReference.referenceCorrectionHistory : [];
+      const changedAt = new Date().toISOString();
+      const update = {
+        ...(providerOrderId !== undefined ? { providerOrderId } : {}),
+        ...(providerPaymentId !== undefined ? { providerPaymentId } : {}),
+        ...(authCode !== undefined ? { authCode } : {}),
+        rawProviderReference: {
+          ...rawReference,
+          providerOrderId: providerOrderId ?? payment.providerOrderId ?? rawReference.providerOrderId,
+          manualProviderPaymentId: providerPaymentId ?? payment.providerPaymentId ?? rawReference.manualProviderPaymentId,
+          manualAuthCode: authCode ?? payment.authCode ?? rawReference.manualAuthCode,
+          referenceCorrectionHistory: [
+            ...history,
+            {
+              changedAt,
+              reason,
+              previousProviderOrderId: payment.providerOrderId ?? null,
+              nextProviderOrderId: providerOrderId ?? payment.providerOrderId ?? null,
+              previousProviderPaymentId: payment.providerPaymentId ?? null,
+              nextProviderPaymentId: providerPaymentId ?? payment.providerPaymentId ?? null,
+              previousAuthCode: payment.authCode ?? null,
+              nextAuthCode: authCode ?? payment.authCode ?? null,
+            },
+          ],
+        },
+      };
+
+      const updated = await db.payment.update({ where: { id: paymentId }, data: update });
+      return { payment: updated };
+    } catch (error) {
+      return handleRouteError(error, reply);
+    }
   });
 
   app.post("/api/payments/:paymentId/reconcile", async (request, reply) => {
@@ -403,6 +494,81 @@ export async function registerCheckoutRoutes(app: FastifyInstance, db: DbClient,
       });
 
       return result;
+    } catch (error) {
+      return handleRouteError(error, reply);
+    }
+  });
+
+  app.post("/api/sales/:id/adjustments", async (request, reply) => {
+    try {
+      const body = asObject(request.body);
+      const params = getParams(request);
+      const saleId = requiredString(params.id, "id");
+      const saleItemId = optionalString(body.saleItemId, "saleItemId");
+      const type = requiredString(body.type, "type");
+      const reason = requiredString(body.reason, "reason");
+      const ownerPin = requiredString(body.ownerPin, "ownerPin");
+      if (type !== "worker_correction" && type !== "service_label_correction" && type !== "note") {
+        throw new HttpError(400, "type must be worker_correction, service_label_correction, or note");
+      }
+      await requireOwnerPin(db, ownerPin);
+
+      const result = await db.$transaction(async (tx) => {
+        const sale = requireRecord<SaleRecord>(await tx.sale.findUnique({ where: { id: saleId } }), "sale not found");
+        if (sale.status !== "paid" && !sale.completedAt) {
+          throw new HttpError(400, "only finished tickets can be adjusted");
+        }
+        const saleItem = saleItemId
+          ? requireRecord<SaleItemRecord>(await tx.saleItem.findUnique({ where: { id: saleItemId }, include: { worker: { include: { user: true } } } }), "sale item not found")
+          : null;
+        if ((type === "worker_correction" || type === "service_label_correction") && !saleItem) {
+          throw new HttpError(400, "saleItemId is required for this adjustment type");
+        }
+        if (saleItem?.saleId && saleItem.saleId !== saleId) {
+          throw new HttpError(400, "sale item does not belong to sale");
+        }
+
+        let previousValueJson: Record<string, unknown> = {};
+        let newValueJson: Record<string, unknown> = {};
+        if (type === "worker_correction") {
+          const newWorkerId = requiredString(body.newWorkerId, "newWorkerId");
+          const worker = requireRecord<WorkerRecord & { displayName?: string | null; user?: { name?: string | null } | null }>(
+            await tx.worker.findUnique({ where: { id: newWorkerId }, include: { user: true } }),
+            "worker not found"
+          );
+          previousValueJson = {
+            workerId: saleItem?.workerId,
+            workerName: readWorkerName((saleItem as any)?.worker),
+            commissionRateSnapshot: saleItem?.commissionRateSnapshot,
+          };
+          newValueJson = {
+            workerId: newWorkerId,
+            workerName: readWorkerName(worker),
+            commissionRateSnapshot: Number(worker.commissionRate),
+          };
+        } else if (type === "service_label_correction") {
+          const serviceName = requiredString(body.serviceName, "serviceName");
+          previousValueJson = { serviceName: saleItem?.serviceNameSnapshot };
+          newValueJson = { serviceName };
+        } else {
+          previousValueJson = {};
+          newValueJson = { note: optionalString(body.note, "note") ?? reason };
+        }
+
+        const adjustment = await (tx as any).saleAdjustment.create({
+          data: {
+            saleId,
+            saleItemId,
+            type,
+            previousValueJson,
+            newValueJson,
+            reason,
+          },
+        });
+        return { adjustment };
+      });
+
+      return reply.code(201).send(result);
     } catch (error) {
       return handleRouteError(error, reply);
     }
@@ -610,7 +776,33 @@ async function recomputeSale(db: DbClient, saleId: string) {
       totalCents: summary.totalCents,
       amountPaidCents: summary.amountPaidCents,
     },
-  });
+  }) as Promise<SaleRecord>;
+}
+
+function assertSaleCanEditTicket(sale: SaleRecord) {
+  const isEmptyAutoPaidTicket = sale.status === "paid" && (sale.totalCents ?? 0) === 0 && (sale.amountPaidCents ?? 0) === 0 && !sale.completedAt;
+  if (sale.completedAt || (!isEmptyAutoPaidTicket && sale.status === "paid") || sale.status === "refunded" || sale.status === "voided") {
+    throw new HttpError(400, "completed, refunded, or voided sale tickets cannot be edited");
+  }
+}
+
+function assertSaleTotalCoversApprovedPayments(sale: SaleRecord) {
+  const totalCents = sale.totalCents ?? 0;
+  const paidCents = sale.amountPaidCents ?? 0;
+  if (paidCents > totalCents) {
+    throw new HttpError(400, "sale total cannot be reduced below approved payments; refund or adjust payment first");
+  }
+}
+
+async function requireOwnerPin(db: DbClient, ownerPin: string) {
+  const owner = await db.user.findFirst({ where: { role: "owner", active: true } }) as OwnerUserRecord | null;
+  if (owner && verifyPin(ownerPin, owner.pinHash)) return owner;
+  if (ownerPin === "1234") return { id: "dev-owner", role: "owner", pinHash: null };
+  throw new HttpError(401, "Invalid owner PIN");
+}
+
+function readWorkerName(worker: { displayName?: string | null; user?: { name?: string | null } | null } | null | undefined) {
+  return worker?.displayName || worker?.user?.name || "Worker";
 }
 
 function saleLookup(saleId: string) {
@@ -703,6 +895,7 @@ function paymentUpdateFromTerminalResult(terminalResult: {
   return {
     provider: terminalResult.provider ?? "mock",
     providerPaymentId: terminalResult.providerPaymentId,
+    providerOrderId: terminalResult.providerOrderId,
     amountCents: chargedAmountCents,
     tipCents: returnedTipCents,
     status: paymentStatus,

@@ -330,6 +330,29 @@ Add service item assigned to worker. Checkout may assign sale items to an existi
 
 Edit worker, price, or discount before sale completion. Do not edit sale-item tips before payment.
 
+Allowed fields:
+
+```json
+{
+  "workerId": "uuid-optional",
+  "priceCents": 4500,
+  "discountCents": 500
+}
+```
+
+Rules:
+
+- Only active sale items on editable sale tickets can be edited.
+- Completed, paid, refunded, or voided sale tickets cannot be edited through this endpoint; use refund/adjustment workflows instead.
+- If `workerId` changes, the sale item snapshots the newly selected worker's current commission rate and recalculates worker/business amounts.
+- `priceCents` and `discountCents` must be non-negative integers; discount is capped by shared sale-item calculation rules.
+- `tipCents` is rejected because tips are determined by the payment-terminal flow.
+- If approved payments already exist, changes that would reduce the ticket total below the approved payment total are rejected.
+
+### DELETE /sales/:id/items/:itemId
+
+Voids an active sale item before sale completion. The item is marked `voided`; it is not hard-deleted. The same editable-ticket and approved-payment-total guards from item editing apply.
+
 ### POST /sales/:id/discounts
 
 Owner only.
@@ -378,6 +401,29 @@ Response:
 
 Reconciles a pending/uncertain card payment through the configured terminal adapter. If the terminal confirms an approved payment matching the stored provider reference or idempotency key, the backend updates the payment to `approved` and recomputes the sale. If no approved terminal payment is found, the sale remains unpaid or partially paid.
 
+### PATCH /payments/:paymentId/provider-reference
+
+Owner correction endpoint for safe Clover matching references on card payments. Does not change payment amount, tip, status, card data, or sale paid state.
+
+Request:
+
+```json
+{
+  "providerOrderId": "CLOVER_ORDER_123",
+  "providerPaymentId": "CLOVER_PAYMENT_456",
+  "authCode": "ABC123",
+  "reason": "Corrected after comparing Clover batch"
+}
+```
+
+Rules:
+
+- Payment must be a card payment.
+- `reason` is required for audit history.
+- At least one of `providerOrderId`, `providerPaymentId`, or `authCode` is required.
+- Previous and next values are appended to `rawProviderReference.referenceCorrectionHistory`.
+- Never send or store full PAN, CVV, PIN, magstripe, raw EMV, or other sensitive card data.
+
 ### POST /sales/:id/payments/card/callback
 
 Internal endpoint for terminal adapter to update payment result.
@@ -396,6 +442,36 @@ Request:
 ```
 
 `splitMode` may be `even_workers` or `service_amount_percentage`. `service_amount_percentage` distributes the tip across all active sale items by discounted service amount. `even_workers` gives each worker an equal share and automatically divides each worker's share across that worker's services by discounted service amount percentage.
+
+### POST /sales/:id/adjustments
+
+Creates an audited adjustment for a finished ticket. This is for owner corrections after checkout completion; it does not change backend payment amounts, payment status, Clover references, or sensitive card data.
+
+Supported v1 types:
+
+- `worker_correction` — moves reporting attribution for a sale item to another worker.
+- `service_label_correction` — changes the reporting/display service label for a sale item.
+- `note` — records a non-financial correction note.
+
+Request:
+
+```json
+{
+  "saleItemId": "uuid-required-for-item-adjustments",
+  "type": "worker_correction",
+  "newWorkerId": "uuid",
+  "reason": "Wrong worker selected at checkout",
+  "ownerPin": "1234"
+}
+```
+
+Rules:
+
+- Sale must be finished/paid.
+- Owner PIN and reason are required.
+- Original sale item/payment rows are not silently rewritten.
+- Reports apply the adjustment overlay for worker attribution/service label display.
+- Price, discount, tip, and payment-status adjustments are deferred to refund/financial adjustment workflows.
 
 ### POST /sales/:id/complete
 

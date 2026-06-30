@@ -101,6 +101,16 @@ Expected:
 - Payment/sale status updated appropriately.
 - Reports subtract refund.
 
+### Finished ticket adjustment
+
+Expected:
+
+- Paid ticket cannot be directly edited through normal sale-item edit routes.
+- Owner PIN plus reason can create a worker-correction adjustment.
+- Worker earnings and sales ticket reports apply the corrected worker attribution.
+- Original sale item and payment rows remain unchanged.
+- Missing/invalid owner PIN is rejected.
+
 ## Permission tests
 
 ### Worker forbidden actions
