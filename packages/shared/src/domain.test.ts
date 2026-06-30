@@ -1,15 +1,31 @@
 import { describe, expect, it } from "vitest";
 import {
   calculateCommission,
+  calculateFinalServiceCents,
   calculateSaleItem,
   calculateSaleTotals,
   countTurnsTaken,
   evaluateSaleCompletion,
   rankSuggestedWorkers,
+  readCents,
   summarizeSale,
   allocateTipToSaleItems,
   type PaymentInput,
 } from "./index.js";
+
+describe("money helpers", () => {
+  it("coerces invalid cent values to zero", () => {
+    expect(readCents(1250)).toBe(1250);
+    expect(readCents("1250")).toBe(0);
+    expect(readCents(Number.NaN)).toBe(0);
+  });
+
+  it("calculates final service cents from unknown values", () => {
+    expect(calculateFinalServiceCents(5000, 500)).toBe(4500);
+    expect(calculateFinalServiceCents(500, 5000)).toBe(0);
+    expect(calculateFinalServiceCents("5000", 500)).toBe(0);
+  });
+});
 
 describe("commission calculation", () => {
   it("calculates commission, tips, and business share from the test plan example", () => {

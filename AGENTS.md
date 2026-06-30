@@ -63,14 +63,18 @@ When an approved code change intentionally changes documented behavior, architec
 ```text
 apps/
   owner-pos        React + Vite owner POS shell
+    src/app        App shell and view switching
+    src/screens    Screen-specific components, helpers, and CSS
   worker-pwa       React + Vite worker PWA shell
   customer-pwa     React + Vite customer PWA shell
   local-api        Fastify local API
+    src/routes     Route modules, with larger workflows split into subdirectories
 packages/
   shared           Shared business/domain logic
   db               Prisma schema, migrations, seed, DB client exports
   payment-terminal Payment terminal interface and mock adapter
   receipt-printer  Receipt printer interface and mock adapter
+scripts/db/        Optional/manual SQL helper scripts
 docs/              Product and architecture docs
 api/               API specification
 workflows/         Business workflow docs

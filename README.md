@@ -142,6 +142,8 @@ packages/
   db               Prisma schema, migration, and seed
   payment-terminal Payment terminal interface and mock adapter
   receipt-printer  Receipt printer interface and mock adapter
+scripts/
+  db               Optional/manual SQL helper scripts
 ```
 
 ### Local startup

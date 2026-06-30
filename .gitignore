@@ -7,3 +7,10 @@ coverage/
 *.local
 *.tsbuildinfo
 packages/db/prisma/generated/
+
+# Local/generated agent and indexing artifacts
+.gitnexus/
+.claude/
+CLAUDE.md
+_tmp_*
+undefined/

@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { DbClient } from "../db.js";
-import { sumTurnCounts } from "@nail/shared";
+import { calculateFinalServiceCents, readCents, sumTurnCounts } from "@nail/shared";
 import { verifyWorkerToken } from "./auth.js";
 import { getParams, getQuery, handleRouteError, optionalString, requiredString } from "../http.js";
 
@@ -236,12 +236,10 @@ function buildWorkerTicket(sale: any, workerId: string, workerName: string) {
   };
 }
 
-function cents(value: unknown) {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
+const cents = readCents;
 
 function getFinalServiceCents(item: any) {
   const stored = cents(item.finalServiceCents);
   if (stored > 0) return stored;
-  return Math.max(cents(item.priceCents) - cents(item.discountCents), 0);
+  return calculateFinalServiceCents(item.priceCents, item.discountCents);
 }

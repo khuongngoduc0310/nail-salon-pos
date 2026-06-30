@@ -39,3 +39,11 @@ export function assertNonNegativeInteger(value: number, fieldName: string): void
     throw new RangeError(`${fieldName} must be a non-negative integer`);
   }
 }
+
+export function readCents(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+export function calculateFinalServiceCents(priceCents: unknown, discountCents: unknown): number {
+  return Math.max(readCents(priceCents) - readCents(discountCents), 0);
+}

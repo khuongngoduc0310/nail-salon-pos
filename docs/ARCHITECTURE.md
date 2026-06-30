@@ -33,6 +33,13 @@ Responsibilities:
 - Clover adapter.
 - Sync queue.
 
+Implementation organization:
+
+- Fastify route registration lives in `apps/local-api/src/routes`.
+- Larger route groups such as checkout are split into subdirectories by workflow area: item edits, payments, tip allocation, adjustments, and completion.
+- Shared route helpers and report adjustment overlays live next to the route group until they are broadly reusable enough for `packages/shared`.
+- Owner POS screen code is organized under `apps/owner-pos/src/screens`, with app-level view switching in `apps/owner-pos/src/app`.
+
 Local server should be available at a stable LAN address such as:
 
 ```text
