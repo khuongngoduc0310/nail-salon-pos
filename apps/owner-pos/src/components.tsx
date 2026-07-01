@@ -257,7 +257,11 @@ export function BottomNav({ items }: BottomNavProps) {
   return (
     <nav className="bottom-nav">
       {items.map((item) => (
-        <button key={item.label} className={`bottom-nav__item ${item.active ? "bottom-nav__item--active" : ""}`} onClick={item.onClick}>
+        <button
+          key={item.label}
+          className={`bottom-nav__item ${item.active ? "bottom-nav__item--active" : ""} ${item.label === "Checkout" ? "bottom-nav__item--checkout" : ""}`}
+          onClick={item.onClick}
+        >
           <span className="bottom-nav__icon">{item.icon}</span>
           <span className="bottom-nav__label">{item.label}</span>
         </button>

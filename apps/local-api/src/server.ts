@@ -123,7 +123,11 @@ async function readTerminalStatus(terminal: RuntimePaymentTerminalManager) {
 
 async function readTerminalPairStatus(terminal: RuntimePaymentTerminalManager) {
   const mockPairing = await readMockCloverPairingStatus(terminal);
-  const status = terminal.getCachedConnectionStatus() ?? await terminal.verifyConnection();
+  const status = terminal.getCachedConnectionStatus() ?? {
+    connected: false,
+    provider: "clover" as const,
+    message: "Clover pairing has not been started. Press Connect / Pair to start pairing.",
+  };
   if (!mockPairing) return status;
   return {
     ...status,
@@ -140,13 +144,32 @@ async function readTerminalPairStatus(terminal: RuntimePaymentTerminalManager) {
 
 async function startTerminalPairing(terminal: RuntimePaymentTerminalManager) {
   const mockPairing = await postMockCloverPairing(terminal, "/mock/pair/start");
-  if (!mockPairing) return terminal.verifyConnection();
+  if (!mockPairing) {
+    const status = await terminal.verifyConnection();
+    if (status.connected || status.pairingCode) return status;
+    return waitForTerminalPairingCode(terminal, status);
+  }
   return {
     connected: false,
     provider: "clover" as const,
     pairingRequired: true,
     message: "Enter the pairing code shown on the mock Clover device",
   };
+}
+
+async function waitForTerminalPairingCode(terminal: RuntimePaymentTerminalManager, fallbackStatus: Awaited<ReturnType<RuntimePaymentTerminalManager["verifyConnection"]>>) {
+  const deadline = Date.now() + 8000;
+  let latestStatus = fallbackStatus;
+  while (Date.now() < deadline) {
+    await delay(250);
+    latestStatus = terminal.getCachedConnectionStatus() ?? latestStatus;
+    if (latestStatus.connected || latestStatus.pairingCode) return latestStatus;
+  }
+  return latestStatus;
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function confirmTerminalPairing(terminal: RuntimePaymentTerminalManager, pairingCode: string) {

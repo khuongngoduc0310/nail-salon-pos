@@ -26,7 +26,6 @@ import {
   updateTerminalConfig,
   fetchTerminalStatus,
   startTerminalPairing,
-  fetchTerminalPairStatus,
   confirmTerminalPairing,
   updatePaymentProviderReference,
   createSaleAdjustment,
@@ -150,6 +149,15 @@ export default function App() {
 
   return (
     <div className="has-bottom-nav">
+      <BottomNav
+        items={[
+          { icon: "🏠", label: "Floor", active: view === "dashboard", onClick: () => openView("dashboard") },
+          { icon: "💳", label: "Checkout", active: view === "checkout", onClick: () => openView("checkout") },
+          { icon: "💅", label: "Services", active: view === "services", onClick: () => openView("services") },
+          { icon: "👥", label: "Workers", active: view === "workers", onClick: () => openView("workers") },
+          { icon: "📊", label: "Reports", active: view === "reports", onClick: () => openView("reports") },
+        ]}
+      />
       <main className="app-shell">
         {view === "dashboard" && (
           <Dashboard
@@ -162,15 +170,6 @@ export default function App() {
         {view === "workers" && <WorkersScreen onOpenReportsForWorker={openReportsForWorker} />}
         {view === "reports" && <ReportsScreen initialReport={reportTarget?.report} initialWorkerId={reportTarget?.workerId} />}
       </main>
-      <BottomNav
-        items={[
-          { icon: "🏠", label: "Floor", active: view === "dashboard", onClick: () => openView("dashboard") },
-          { icon: "💳", label: "Checkout", active: view === "checkout", onClick: () => openView("checkout") },
-          { icon: "💅", label: "Services", active: view === "services", onClick: () => openView("services") },
-          { icon: "👥", label: "Workers", active: view === "workers", onClick: () => openView("workers") },
-          { icon: "📊", label: "Reports", active: view === "reports", onClick: () => openView("reports") },
-        ]}
-      />
       <SecurePinModal
         open={secureRequest !== null}
         title={secureRequest?.title ?? ""}
@@ -1988,6 +1987,8 @@ export const MOCK_ASSIGN_WORKERS: AssignWorker[] = [
    Checkout Screen — 4-column iPad layout
    ════════════════════════════════════════ */
 
+type CloverPairingStep = "not_started" | "connecting" | "waiting_for_code" | "code_ready" | "waiting_for_approval" | "ready" | "failed" | "timed_out";
+
 type TerminalConfigForm = {
   transport: TerminalConfig["transport"];
   cloudBaseUrl: string;
@@ -2142,6 +2143,7 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
   const [terminalStatus, setTerminalStatus] = useState<TerminalStatus | null>(null);
   const [terminalStatusLoading, setTerminalStatusLoading] = useState(false);
   const [pairingModalOpen, setPairingModalOpen] = useState(false);
+  const [pairingStep, setPairingStep] = useState<CloverPairingStep>("not_started");
   const [pairingError, setPairingError] = useState("");
   const [pairingCodeInput, setPairingCodeInput] = useState("");
   const [terminalConfigOpen, setTerminalConfigOpen] = useState(false);
@@ -2150,7 +2152,7 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
   const [terminalConfigError, setTerminalConfigError] = useState("");
   const [terminalConfigSaving, setTerminalConfigSaving] = useState(false);
   const [checkoutDraftLoaded, setCheckoutDraftLoaded] = useState(false);
-  const pairingPollInFlightRef = useRef(false);
+  const terminalStatusPollInFlightRef = useRef(false);
 
   const subtotal = items.reduce((s, i) => s + i.priceCents, 0);
   const discounts = items.reduce((s, i) => s + i.discountCents, 0);
@@ -2268,26 +2270,38 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
 
   const updateTerminalStatus = (status: TerminalStatus) => {
     setTerminalStatus(status);
-    if (status.pairingRequired || status.pairingCode) {
-      setPairingModalOpen(true);
-    }
     if (status.connected) {
+      setPairingStep("ready");
       setPairingError("");
       setPairingModalOpen(false);
+      return;
+    }
+    if (status.pairingCode) {
+      setPairingStep("code_ready");
+      setPairingModalOpen(true);
+      return;
+    }
+    if (status.pairingRequired) {
+      setPairingStep("waiting_for_code");
+      setPairingModalOpen(true);
     }
   };
 
   const refreshTerminalStatus = async () => {
+    if (terminalStatusPollInFlightRef.current) return;
+    terminalStatusPollInFlightRef.current = true;
     setTerminalStatusLoading(true);
     try {
       updateTerminalStatus(await fetchTerminalStatus());
     } catch (err) {
+      setPairingStep("failed");
       setTerminalStatus({
         connected: false,
         provider: "clover",
         message: err instanceof Error ? err.message : "Unable to reach payment terminal",
       });
     } finally {
+      terminalStatusPollInFlightRef.current = false;
       setTerminalStatusLoading(false);
     }
   };
@@ -2331,6 +2345,7 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
       updateTerminalStatus(result.status);
       setTerminalConfigOpen(false);
       if ((result.config.transport === "ws-lan" || result.config.transport === "ws-cloud") && !result.status.connected) {
+        setPairingStep("not_started");
         setPairingModalOpen(true);
       }
     } catch (err) {
@@ -2342,12 +2357,18 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
 
   const beginTerminalPairing = async () => {
     setTerminalStatusLoading(true);
+    setPairingStep("connecting");
     setPairingError("");
     setPairingCodeInput("");
     setPairingModalOpen(true);
     try {
-      updateTerminalStatus(await startTerminalPairing());
+      const status = await startTerminalPairing();
+      updateTerminalStatus(status);
+      if (!status.connected && !status.pairingCode && isRealCloverLan) {
+        setPairingStep(status.pairingRequired ? "timed_out" : "failed");
+      }
     } catch (err) {
+      setPairingStep("failed");
       setPairingError(err instanceof Error ? err.message : "Unable to start Clover pairing.");
     } finally {
       setTerminalStatusLoading(false);
@@ -2372,41 +2393,8 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
   };
 
   useEffect(() => {
-    void refreshTerminalStatus();
     void loadTerminalConfig();
   }, []);
-
-  useEffect(() => {
-    if (activeMethod === "card") {
-      void refreshTerminalStatus();
-    }
-  }, [activeMethod]);
-
-  useEffect(() => {
-    if (!pairingModalOpen) return;
-    const pollPairing = async () => {
-      if (pairingPollInFlightRef.current) return;
-      pairingPollInFlightRef.current = true;
-      try {
-        updateTerminalStatus(await fetchTerminalPairStatus());
-      } catch (err) {
-        setPairingError(err instanceof Error ? err.message : "Unable to refresh Clover pairing status.");
-      } finally {
-        pairingPollInFlightRef.current = false;
-      }
-    };
-    const intervalId = window.setInterval(() => { void pollPairing(); }, 5000);
-    return () => {
-      window.clearInterval(intervalId);
-      pairingPollInFlightRef.current = false;
-    };
-  }, [pairingModalOpen]);
-
-  useEffect(() => {
-    if (pairingModalOpen || activeMethod !== "card" || !isRealCloverTransport || terminalStatus?.connected) return;
-    const intervalId = window.setInterval(() => { void refreshTerminalStatus(); }, 3000);
-    return () => window.clearInterval(intervalId);
-  }, [pairingModalOpen, activeMethod, isRealCloverTransport, terminalStatus?.connected]);
 
   const handleSelectWorker = (worker: Worker) => {
     setError("");
@@ -2786,6 +2774,32 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
     void initSale();
   };
 
+  const pairingProgressSteps: Array<{ step: CloverPairingStep; label: string }> = [
+    { step: "connecting", label: "Start connection" },
+    { step: "waiting_for_code", label: "Get pairing code" },
+    { step: "code_ready", label: "Enter code on Clover" },
+    { step: "waiting_for_approval", label: "Clover approval" },
+    { step: "ready", label: "Ready" },
+  ];
+  const activePairingStepIndex = pairingStep === "not_started" || pairingStep === "failed" || pairingStep === "timed_out"
+    ? -1
+    : pairingProgressSteps.findIndex((step) => step.step === pairingStep);
+  const pairingStatusMessage = pairingStep === "not_started"
+    ? "Clover pairing has not started. Press Connect / Pair when the Clover Mini is ready."
+    : pairingStep === "connecting"
+      ? "Connecting to Clover Mini from the local API..."
+      : pairingStep === "waiting_for_code"
+        ? "Waiting for Clover to send a pairing code."
+        : pairingStep === "code_ready"
+          ? "Enter this code on the Clover Mini, then press Refresh Status after Clover accepts it."
+          : pairingStep === "waiting_for_approval"
+            ? "Waiting for Clover to approve pairing."
+            : pairingStep === "ready"
+              ? "Clover is connected and ready for card payments."
+              : pairingStep === "timed_out"
+                ? "No pairing code was received. Check Clover IP, Secure Network Pay Display, and network connection, then try again."
+                : pairingError || terminalStatus?.message || "Clover pairing failed.";
+
   // ── Done overlay ──
   if (mode === "done") {
     return (
@@ -2801,8 +2815,14 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
             Change due: {formatMoney(changeCents)}
           </p>
         )}
+        <div className="checkout-done-overlay__actions">
+          <Button onClick={startNewSale}>New Sale</Button>
+          <Button variant="secondary" onClick={() => { resetSale(); onBack(); }}>
+            Back to Floor
+          </Button>
+        </div>
         {items.length > 0 && (
-          <div style={{ width: "100%", maxWidth: "400px", marginTop: "var(--space-4)" }}>
+          <div className="checkout-done-overlay__receipt">
             <ReceiptPreview
               items={items}
               payments={payments}
@@ -2813,12 +2833,6 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
             />
           </div>
         )}
-        <div className="checkout-done-overlay__actions">
-          <Button onClick={startNewSale}>New Sale</Button>
-          <Button variant="secondary" onClick={() => { resetSale(); onBack(); }}>
-            Back to Floor
-          </Button>
-        </div>
       </div>
     );
   }
@@ -3114,9 +3128,12 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
             )}
             <div className="payment-action-stack">
               {remaining > 0 && (
-                <Button fullWidth variant="secondary" onClick={exactPayment} loading={loading} size="lg" className="payment-touch-button">
-                  {activeMethod === "card" && isRealCloverTransport ? "Send Exact to Clover" : "Pay Exact"}
-                  <span className="payment-touch-button__amount">{formatMoney(remaining)}</span>
+                <Button fullWidth variant="secondary" onClick={exactPayment} loading={loading} size="lg" className="payment-touch-button payment-touch-button--exact">
+                  <span className="payment-touch-button__icon" aria-hidden="true">✅</span>
+                  <span className="payment-touch-button__content">
+                    <span>{activeMethod === "card" && isRealCloverTransport ? "Send Exact Balance to Clover" : "Pay Exact Balance"}</span>
+                    <span className="payment-touch-button__amount">{formatMoney(remaining)}</span>
+                  </span>
                 </Button>
               )}
               <Button
@@ -3127,7 +3144,11 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
                 onClick={openPaymentAmountModal}
                 disabled={remaining <= 0 || loading}
               >
-                Enter Custom Amount
+                <span className="payment-touch-button__icon" aria-hidden="true">✏️</span>
+                <span className="payment-touch-button__content">
+                  <span>Enter Different Amount</span>
+                  <small>Use for split or partial payments</small>
+                </span>
               </Button>
             </div>
 
@@ -3328,6 +3349,11 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
           <Button variant="secondary" onClick={() => { void beginTerminalPairing(); }} loading={terminalStatusLoading}>
             Restart Connect
           </Button>
+          {isRealCloverLan && pairingStep === "code_ready" && (
+            <Button variant="secondary" onClick={() => setPairingStep("waiting_for_approval")} disabled={terminalStatusLoading}>
+              I Entered Code
+            </Button>
+          )}
           {!isRealCloverLan && !isCloverCloudWs && (
             <Button onClick={() => { void submitTerminalPairingCode(); }} loading={terminalStatusLoading}>
               Pair
@@ -3336,55 +3362,58 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
         </>
       }
     >
-      {terminalStatus?.connected ? (
-        <div className="clover-pairing-status clover-pairing-status--connected">
-          Clover is connected and ready for card payments.
+      <div className="clover-pairing-content">
+        <div className={`clover-pairing-banner clover-pairing-banner--${pairingStep}`}>
+          <strong>{pairingStep.replaceAll("_", " ")}</strong>
+          <span>{pairingStatusMessage}</span>
         </div>
-      ) : isCloverCloudWs ? (
-        <div className="clover-pairing-content">
-          <div className="clover-process-panel">
-            <div><strong>1.</strong> Keep Cloud Pay Display open and started on the Clover Mini.</div>
-            <div><strong>2.</strong> POS connects to {terminalEndpoint} through Clover Remote Pay Cloud.</div>
-            <div><strong>3.</strong> Wait for status to change to Ready, then send the card payment.</div>
-          </div>
-          <p className="clover-pairing-status">{terminalStatus?.message ?? "Waiting for Clover Remote Pay Cloud ready status..."}</p>
-          {pairingError && <p className="field__error">{pairingError}</p>}
+        <div className="clover-pairing-progress" aria-label="Clover pairing progress">
+          {pairingProgressSteps.map((step, index) => {
+            const isDone = terminalStatus?.connected || (activePairingStepIndex > index && activePairingStepIndex >= 0);
+            const isActive = activePairingStepIndex === index;
+            return (
+              <div key={step.step} className={`clover-pairing-progress__step ${isDone ? "clover-pairing-progress__step--done" : ""} ${isActive ? "clover-pairing-progress__step--active" : ""}`}>
+                <span>{isDone ? "✓" : isActive ? "→" : "○"}</span>
+                <strong>{step.label}</strong>
+              </div>
+            );
+          })}
         </div>
-      ) : isRealCloverLan ? (
-        <div className="clover-pairing-content">
-          <div className="clover-process-panel">
-            <div><strong>1.</strong> Keep Secure Network Pay Display open on the Clover Mini.</div>
-            <div><strong>2.</strong> POS connects to {terminalEndpoint} from the local API.</div>
-            <div><strong>3.</strong> If Clover asks for pairing, enter the POS code below on the Clover Mini.</div>
-            <div><strong>4.</strong> Leave this window open until status changes to Ready.</div>
-          </div>
-          {terminalStatus?.pairingCode ? (
+        <div className="clover-process-panel">
+          {isCloverCloudWs ? (
             <>
-              <div className="clover-pairing-code">{terminalStatus.pairingCode}</div>
-              <p className="clover-pairing-status">Enter this code on the Clover Mini. The POS will continue automatically after Clover approves pairing.</p>
+              <div><strong>1.</strong> Keep Cloud Pay Display open and started on the Clover Mini.</div>
+              <div><strong>2.</strong> POS connects to {terminalEndpoint} through Clover Remote Pay Cloud.</div>
+              <div><strong>3.</strong> Press Refresh Status manually after the device is ready.</div>
+            </>
+          ) : isRealCloverLan ? (
+            <>
+              <div><strong>1.</strong> Keep Secure Network Pay Display open on the Clover Mini.</div>
+              <div><strong>2.</strong> POS connects to {terminalEndpoint} from the local API.</div>
+              <div><strong>3.</strong> If a code appears, enter it on the Clover Mini.</div>
+              <div><strong>4.</strong> Press Refresh Status manually after Clover approves pairing.</div>
             </>
           ) : (
-            <p className="clover-pairing-status">{terminalStatus?.message ?? "Waiting for Clover to send a pairing code or ready status..."}</p>
+            <div>For mock Clover, look at the code shown on the mock Clover screen, then enter that code here in POS.</div>
           )}
-          {pairingError && <p className="field__error">{pairingError}</p>}
         </div>
-      ) : (
-        <div className="clover-pairing-content">
-          <p className="text-muted text-sm" style={{ marginTop: 0 }}>
-            For mock Clover, look at the code shown on the mock Clover screen, then enter that code here in POS.
-          </p>
+        {terminalStatus?.pairingCode && (
+          <>
+            <div className="clover-pairing-code">{terminalStatus.pairingCode}</div>
+            <p className="clover-pairing-status">Enter this code on the Clover Mini.</p>
+          </>
+        )}
+        {!isRealCloverLan && !isCloverCloudWs && (
           <Input
             label="Pairing Code"
             value={pairingCodeInput}
             onChange={(event) => setPairingCodeInput(event.target.value.replace(/\D/g, "").slice(0, 6))}
             placeholder="123456"
           />
-          <p className="clover-pairing-status">
-            {terminalStatus?.message ?? "Waiting for the code shown on mock Clover..."}
-          </p>
-          {pairingError && <p className="field__error">{pairingError}</p>}
-        </div>
-      )}
+        )}
+        {terminalStatus?.message && <p className="clover-pairing-status">{terminalStatus.message}</p>}
+        {pairingError && <p className="field__error">{pairingError}</p>}
+      </div>
     </Modal>
     <Modal
       open={pendingTipAllocation !== null}
