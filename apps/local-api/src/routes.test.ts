@@ -136,7 +136,7 @@ function createCheckoutFakeDb() {
       status: "open",
       totalCents: 0,
       amountPaidCents: 0,
-      items: [] as Array<{ id: string; priceCents: number; discountCents: number; tipCents: number; status: string }>,
+      items: [] as Array<{ id: string; priceCents: number; discountCents: number; tipCents: number; status: string; workerId?: string; serviceNameSnapshot?: string; categoryNameSnapshot?: string | null; finalServiceCents?: number; commissionRateSnapshot?: number; workerTotalCents?: number; businessCents?: number }>,
       payments: [] as Array<{ id?: string; saleId?: string; method: "cash" | "card" | "gift_card"; amountCents: number; tipCents?: number; status: "pending" | "approved" | "declined" | "cancelled" | "failed"; provider?: string; providerPaymentId?: string; providerOrderId?: string; authCode?: string; cardBrand?: string; cardLast4?: string; idempotencyKey?: string; rawProviderReference?: unknown; createdAt?: Date }>,
     },
   };
@@ -211,8 +211,8 @@ function createCheckoutFakeDb() {
         calls.push({ model: "saleItem", method: "update", args });
         const id = (args as { where?: { id?: string }; data?: { status?: string } }).where?.id;
         const item = state.sale.items.find((saleItem) => saleItem.id === id) ?? state.sale.items[0];
-        if (item && (args as { data?: { status?: string } }).data?.status) {
-          item.status = (args as { data: { status: string } }).data.status;
+        if (item) {
+          Object.assign(item, (args as { data?: Record<string, unknown> }).data ?? {});
         }
         return item ?? { id: "item-1", args };
       },
@@ -1706,6 +1706,57 @@ describe("local API CRUD routes", () => {
       providerPaymentId: "clover-payment-1",
       authCode: "OK123",
     });
+  });
+
+  it("allocates recovered Clover tips before completing the sale", async () => {
+    const { db, state } = createCheckoutFakeDb();
+    state.sale.items.push({
+      id: "item-1",
+      workerId: "worker-1",
+      serviceNameSnapshot: "Classic Pedicure",
+      categoryNameSnapshot: "Pedicure",
+      priceCents: 10000,
+      discountCents: 0,
+      finalServiceCents: 10000,
+      tipCents: 0,
+      commissionRateSnapshot: 0.6,
+      status: "active",
+    });
+    const app = await buildServer({ db, logger: false });
+
+    const recovered = await app.inject({
+      method: "POST",
+      url: "/api/sales/sale-1/payments/recover-clover",
+      payload: {
+        amountCents: 12000,
+        tipCents: 2000,
+        providerPaymentId: "clover-payment-with-tip",
+        reason: "Paid on Clover before POS ticket was created",
+        ownerPin: "1234",
+      },
+    });
+    const paymentId = recovered.json<{ payment: { id: string } }>().payment.id;
+
+    expect(recovered.statusCode).toBe(201);
+    expect(recovered.json()).toMatchObject({ requiresTipAllocation: true });
+
+    const blockedCompletion = await app.inject({ method: "POST", url: "/api/sales/sale-1/complete" });
+    expect(blockedCompletion.statusCode).toBe(400);
+    expect(blockedCompletion.json()).toMatchObject({ error: "card tip must be allocated before sale completion" });
+
+    const allocation = await app.inject({
+      method: "POST",
+      url: "/api/sales/sale-1/tips/allocate",
+      payload: { paymentId, splitMode: "service_amount_percentage" },
+    });
+    expect(allocation.statusCode).toBe(200);
+    expect(state.sale.items[0]).toMatchObject({ tipCents: 2000 });
+    expect(state.sale.totalCents).toBe(12000);
+
+    const completion = await app.inject({ method: "POST", url: "/api/sales/sale-1/complete" });
+    expect(completion.statusCode).toBe(200);
+    expect(state.sale.status).toBe("paid");
+    expect(state.sale.amountPaidCents).toBe(12000);
   });
 
   it("rejects duplicate recovered Clover references", async () => {

@@ -70,6 +70,10 @@ export type DbClient = {
     findMany(args?: unknown): Promise<unknown[]>;
     create(args: unknown): Promise<unknown>;
   };
+  saleAdjustment: {
+    findMany(args?: unknown): Promise<unknown[]>;
+    create(args: unknown): Promise<unknown>;
+  };
   refund: {
     findMany(args?: unknown): Promise<unknown[]>;
     create(args: unknown): Promise<unknown>;

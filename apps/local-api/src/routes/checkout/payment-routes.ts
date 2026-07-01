@@ -292,7 +292,7 @@ async function recoverCloverPayment(
         },
       });
 
-      await (tx as any).saleAdjustment.create({
+      await tx.saleAdjustment.create({
         data: {
           saleId,
           type: "note",
