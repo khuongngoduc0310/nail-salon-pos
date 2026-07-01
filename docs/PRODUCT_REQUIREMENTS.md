@@ -177,6 +177,7 @@ Checkout supports:
 - Printed receipt.
 - Refund tracking.
 - Clover card ticket matching: Owner POS displays POS ticket ID, Clover sale/order ID, Clover payment ID, auth code, card brand, and last 4 when available. Owner may correct only safe Clover reference IDs/auth code with a reason for end-of-day matching; amounts, tips, status, and sensitive card data are not editable.
+- Manual Clover recovery: if a customer paid on Clover but the POS did not capture the ticket at the time, owner may create/rebuild the POS ticket, record any cash/gift-card portions normally, then recover only the Clover card portion with safe Clover references, reason, and owner PIN. Recovered Clover tips must use the normal tip allocation flow before completion.
 - Date/time reporting.
 
 Split payment example:

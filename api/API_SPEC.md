@@ -401,6 +401,37 @@ Response:
 
 Reconciles a pending/uncertain card payment through the configured terminal adapter. If the terminal confirms an approved payment matching the stored provider reference or idempotency key, the backend updates the payment to `approved` and recomputes the sale. If no approved terminal payment is found, the sale remains unpaid or partially paid.
 
+### POST /sales/:id/payments/recover-clover
+
+Records an already-approved Clover card payment that was not captured by the POS at payment time. Use this only for the Clover card portion of a ticket; record cash and gift-card portions through their normal payment endpoints first or separately.
+
+Request:
+
+```json
+{
+  "amountCents": 9000,
+  "tipCents": 2000,
+  "providerOrderId": "CLOVER_ORDER_123",
+  "providerPaymentId": "CLOVER_PAYMENT_456",
+  "authCode": "ABC123",
+  "cardBrand": "VISA",
+  "cardLast4": "4242",
+  "reason": "Customer paid on Clover before POS ticket was created",
+  "ownerPin": "1234"
+}
+```
+
+Rules:
+
+- Owner PIN and reason are required.
+- `amountCents` is the total Clover-approved card charge, including any Clover tip.
+- `tipCents` is the tip portion of the Clover-approved card charge and must be less than or equal to `amountCents`.
+- At least one safe Clover reference (`providerOrderId`, `providerPaymentId`, or `authCode`) is required.
+- Duplicate Clover references are rejected.
+- The API creates an approved card `Payment` with `provider = "clover"` and safe recovery metadata only.
+- If `tipCents > 0`, the existing tip-allocation flow must allocate the tip before sale completion.
+- Never send or store full PAN, CVV, PIN, magstripe, raw EMV, or other sensitive card data.
+
 ### PATCH /payments/:paymentId/provider-reference
 
 Owner correction endpoint for safe Clover matching references on card payments. Does not change payment amount, tip, status, card data, or sale paid state.

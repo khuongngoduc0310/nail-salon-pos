@@ -22,6 +22,7 @@ import {
   addCashPayment,
   addGiftCardPayment,
   addCardPayment,
+  recoverCloverPayment,
   fetchTerminalConfig,
   updateTerminalConfig,
   fetchTerminalStatus,
@@ -2123,6 +2124,17 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
   const [payments, setPayments] = useState<PaymentEntry[]>([]);
   const [amountCents, setAmountCents] = useState(0);
   const [paymentAmountModalOpen, setPaymentAmountModalOpen] = useState(false);
+  const [recoverCloverModalOpen, setRecoverCloverModalOpen] = useState(false);
+  const [recoverCloverAmountCents, setRecoverCloverAmountCents] = useState(0);
+  const [recoverCloverTipCents, setRecoverCloverTipCents] = useState(0);
+  const [recoverCloverOrderId, setRecoverCloverOrderId] = useState("");
+  const [recoverCloverPaymentId, setRecoverCloverPaymentId] = useState("");
+  const [recoverCloverAuthCode, setRecoverCloverAuthCode] = useState("");
+  const [recoverCloverCardBrand, setRecoverCloverCardBrand] = useState("");
+  const [recoverCloverCardLast4, setRecoverCloverCardLast4] = useState("");
+  const [recoverCloverReason, setRecoverCloverReason] = useState("");
+  const [recoverCloverOwnerPin, setRecoverCloverOwnerPin] = useState("");
+  const [recoverCloverError, setRecoverCloverError] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [activeMethod, setActiveMethod] = useState("cash");
@@ -2668,6 +2680,90 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
     setPaymentAmountModalOpen(true);
   };
 
+  const openRecoverCloverModal = () => {
+    setRecoverCloverAmountCents(remaining);
+    setRecoverCloverTipCents(0);
+    setRecoverCloverOrderId("");
+    setRecoverCloverPaymentId("");
+    setRecoverCloverAuthCode("");
+    setRecoverCloverCardBrand("");
+    setRecoverCloverCardLast4("");
+    setRecoverCloverReason("Customer paid on Clover before POS captured the payment.");
+    setRecoverCloverOwnerPin("");
+    setRecoverCloverError("");
+    setRecoverCloverModalOpen(true);
+  };
+
+  const submitRecoverCloverPayment = async () => {
+    if (!saleId) return;
+    const providerOrderId = recoverCloverOrderId.trim();
+    const providerPaymentId = recoverCloverPaymentId.trim();
+    const authCode = recoverCloverAuthCode.trim();
+    const cardBrand = recoverCloverCardBrand.trim();
+    const cardLast4 = recoverCloverCardLast4.replace(/\D/g, "").slice(0, 4);
+    const reason = recoverCloverReason.trim();
+    const ownerPin = recoverCloverOwnerPin.trim();
+    if (recoverCloverAmountCents <= 0) {
+      setRecoverCloverError("Enter the Clover-approved card amount.");
+      return;
+    }
+    if (recoverCloverTipCents < 0 || recoverCloverTipCents > recoverCloverAmountCents) {
+      setRecoverCloverError("Tip must be between $0.00 and the Clover-approved card amount.");
+      return;
+    }
+    if (!providerOrderId && !providerPaymentId && !authCode) {
+      setRecoverCloverError("Enter at least one Clover sale ID, payment ID, or auth code.");
+      return;
+    }
+    if (cardLast4 && cardLast4.length !== 4) {
+      setRecoverCloverError("Card last 4 must be exactly 4 digits.");
+      return;
+    }
+    if (!reason || !ownerPin) {
+      setRecoverCloverError("Reason and owner PIN are required.");
+      return;
+    }
+
+    setLoading(true);
+    setRecoverCloverError("");
+    try {
+      const result = await recoverCloverPayment(saleId, {
+        amountCents: recoverCloverAmountCents,
+        tipCents: recoverCloverTipCents,
+        providerOrderId: providerOrderId || undefined,
+        providerPaymentId: providerPaymentId || undefined,
+        authCode: authCode || undefined,
+        cardBrand: cardBrand || undefined,
+        cardLast4: cardLast4 || undefined,
+        reason,
+        ownerPin,
+      });
+      const payment = result.payment;
+      const recordedTipCents = readCents(payment.tipCents);
+      setPayments((prev) => [...prev, {
+        id: readText(payment.id) ?? undefined,
+        method: "card",
+        amountCents: readCents(payment.amountCents) || recoverCloverAmountCents,
+        tipCents: recordedTipCents,
+        provider: readText(payment.provider),
+        providerOrderId: readText(payment.providerOrderId),
+        providerPaymentId: readText(payment.providerPaymentId),
+        authCode: readText(payment.authCode),
+        cardBrand: readText(payment.cardBrand),
+        cardLast4: readText(payment.cardLast4),
+      }]);
+      const paymentId = readText(payment.id);
+      if (paymentId && recordedTipCents > 0) {
+        setPendingTipAllocation({ paymentId, tipCents: recordedTipCents });
+      }
+      setRecoverCloverModalOpen(false);
+    } catch (err) {
+      setRecoverCloverError(err instanceof Error ? err.message : "Unable to recover Clover payment.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const appendPaymentDigit = (digit: string) => {
     setAmountCents((current) => {
       const next = Number(`${current}${digit}`);
@@ -3150,6 +3246,15 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
                   <small>Use for split or partial payments</small>
                 </span>
               </Button>
+              <button
+                type="button"
+                className="recover-clover-button"
+                onClick={openRecoverCloverModal}
+                disabled={!saleId || loading}
+              >
+                <span>Already paid on Clover?</span>
+                <strong>Recover Clover Card Payment</strong>
+              </button>
             </div>
 
             {/* Payment entries */}
@@ -3210,6 +3315,44 @@ function CheckoutScreen({ onBack }: { onBack: () => void }) {
           <button type="button" onClick={() => setAmountCents(Math.floor(remaining / 2))}>Half</button>
           <button type="button" onClick={() => setAmountCents(remaining)}>Remaining</button>
         </div>
+      </div>
+    </Modal>
+    <Modal
+      open={recoverCloverModalOpen}
+      onClose={() => setRecoverCloverModalOpen(false)}
+      title="Recover Clover Card Payment"
+      className="recover-clover-modal"
+      footer={
+        <>
+          <Button variant="secondary" onClick={() => setRecoverCloverModalOpen(false)}>Cancel</Button>
+          <Button onClick={() => { void submitRecoverCloverPayment(); }} loading={loading}>
+            Record Recovered Card
+          </Button>
+        </>
+      }
+    >
+      <div className="recover-clover-form">
+        <p className="text-muted text-sm" style={{ marginTop: 0 }}>
+          Use this only for the card portion already approved on Clover. Record cash and gift-card portions separately.
+        </p>
+        <AmountInput key={`recover-amount-${recoverCloverModalOpen ? "open" : "closed"}`} label="Clover approved card amount" valueCents={recoverCloverAmountCents} onChangeCents={setRecoverCloverAmountCents} />
+        <AmountInput key={`recover-tip-${recoverCloverModalOpen ? "open" : "closed"}`} label="Clover tip included in amount" valueCents={recoverCloverTipCents} onChangeCents={setRecoverCloverTipCents} />
+        <div className="recover-clover-form__grid">
+          <Input label="Clover Sale / Order ID" value={recoverCloverOrderId} onChange={(event) => setRecoverCloverOrderId(event.target.value)} />
+          <Input label="Clover Payment ID" value={recoverCloverPaymentId} onChange={(event) => setRecoverCloverPaymentId(event.target.value)} />
+          <Input label="Auth Code" value={recoverCloverAuthCode} onChange={(event) => setRecoverCloverAuthCode(event.target.value)} />
+          <Input label="Card Brand" value={recoverCloverCardBrand} onChange={(event) => setRecoverCloverCardBrand(event.target.value.toUpperCase())} placeholder="VISA" />
+          <Input label="Card Last 4" value={recoverCloverCardLast4} onChange={(event) => setRecoverCloverCardLast4(event.target.value.replace(/\D/g, "").slice(0, 4))} placeholder="4242" />
+          <Input label="Owner PIN" type="password" value={recoverCloverOwnerPin} onChange={(event) => setRecoverCloverOwnerPin(event.target.value)} />
+        </div>
+        <Input label="Reason" value={recoverCloverReason} onChange={(event) => setRecoverCloverReason(event.target.value)} />
+        <div className="recover-clover-summary">
+          <span>Remaining before recovery</span>
+          <strong>{formatMoney(remaining)}</strong>
+          <span>Recovered payment total</span>
+          <strong>{formatMoney(recoverCloverAmountCents)}</strong>
+        </div>
+        {recoverCloverError && <p className="field__error" role="alert">{recoverCloverError}</p>}
       </div>
     </Modal>
     <Modal
@@ -5236,7 +5379,7 @@ function ReportsScreen({
                       <tr key={payment.id}>
                         <td>{formatDateTime(payment.createdAt)}</td>
                         <td>{payment.customerName}</td>
-                        <td>{methodLabel(payment.method)}{payment.cardLast4 ? ` •••• ${payment.cardLast4}` : ""}</td>
+                        <td>{methodLabel(payment.method)}{payment.provider === "clover" ? " · Clover" : ""}{payment.recovered ? " · Recovered" : ""}{payment.cardLast4 ? ` •••• ${payment.cardLast4}` : ""}</td>
                         <td>{payment.providerOrderId ?? "-"}</td>
                         <td>{payment.providerPaymentId ?? payment.provider ?? "-"}</td>
                         <td>{payment.authCode ?? "-"}</td>

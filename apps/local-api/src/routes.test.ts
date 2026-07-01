@@ -137,7 +137,7 @@ function createCheckoutFakeDb() {
       totalCents: 0,
       amountPaidCents: 0,
       items: [] as Array<{ id: string; priceCents: number; discountCents: number; tipCents: number; status: string }>,
-      payments: [] as Array<{ id?: string; saleId?: string; method: "cash" | "card" | "gift_card"; amountCents: number; status: "pending" | "approved" | "declined" | "cancelled" | "failed"; providerPaymentId?: string; idempotencyKey?: string; rawProviderReference?: unknown; createdAt?: Date }>,
+      payments: [] as Array<{ id?: string; saleId?: string; method: "cash" | "card" | "gift_card"; amountCents: number; tipCents?: number; status: "pending" | "approved" | "declined" | "cancelled" | "failed"; provider?: string; providerPaymentId?: string; providerOrderId?: string; authCode?: string; cardBrand?: string; cardLast4?: string; idempotencyKey?: string; rawProviderReference?: unknown; createdAt?: Date }>,
     },
   };
   const nextId = (prefix: string) => `${prefix}-${id++}`;
@@ -220,7 +220,17 @@ function createCheckoutFakeDb() {
     payment: {
       findMany: async (args?: unknown) => {
         calls.push({ model: "payment", method: "findMany", args });
-        return [];
+        const where = (args as { where?: { OR?: Array<Record<string, string>>; method?: string; provider?: string } } | undefined)?.where;
+        if (!where?.OR) return state.sale.payments;
+        return state.sale.payments.filter((payment) =>
+          (!where.method || payment.method === where.method) &&
+          (!where.provider || payment.provider === where.provider) &&
+          where.OR?.some((condition) =>
+            (condition.providerOrderId && payment.providerOrderId === condition.providerOrderId) ||
+            (condition.providerPaymentId && payment.providerPaymentId === condition.providerPaymentId) ||
+            (condition.authCode && payment.authCode === condition.authCode)
+          )
+        );
       },
       findUnique: async (args: unknown) => {
         calls.push({ model: "payment", method: "findUnique", args });
@@ -245,6 +255,7 @@ function createCheckoutFakeDb() {
       },
     },
     discount: emptyModel("discount", calls),
+    saleAdjustment: emptyModel("saleAdjustment", calls),
     refund: emptyModel("refund", calls),
     session: emptyModel("session", calls),
     workerSession: {
@@ -1658,6 +1669,72 @@ describe("local API CRUD routes", () => {
     expect(complete.statusCode).toBe(200);
     expect(state.sale.status).toBe("paid");
     expect(state.sale.amountPaidCents).toBe(12000);
+  });
+
+  it("recovers an already-approved Clover card portion after cash and gift card payments", async () => {
+    const { db, state } = createCheckoutFakeDb();
+    state.sale.items.push({ id: "item-1", priceCents: 15000, discountCents: 0, tipCents: 0, status: "active" });
+    const app = await buildServer({ db, logger: false });
+
+    await app.inject({ method: "POST", url: "/api/sales/sale-1/payments/cash", payload: { amountCents: 5000 } });
+    await app.inject({ method: "POST", url: "/api/sales/sale-1/payments/gift-card", payload: { amountCents: 3000 } });
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/sales/sale-1/payments/recover-clover",
+      payload: {
+        amountCents: 7000,
+        tipCents: 0,
+        providerOrderId: "clover-order-1",
+        providerPaymentId: "clover-payment-1",
+        authCode: "OK123",
+        cardBrand: "VISA",
+        cardLast4: "4242",
+        reason: "Paid on Clover before POS ticket was created",
+        ownerPin: "1234",
+      },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json()).toMatchObject({ requiresTipAllocation: false });
+    expect(state.sale.amountPaidCents).toBe(15000);
+    expect(state.sale.payments[2]).toMatchObject({
+      method: "card",
+      provider: "clover",
+      status: "approved",
+      amountCents: 7000,
+      providerOrderId: "clover-order-1",
+      providerPaymentId: "clover-payment-1",
+      authCode: "OK123",
+    });
+  });
+
+  it("rejects duplicate recovered Clover references", async () => {
+    const { db, state } = createCheckoutFakeDb();
+    state.sale.items.push({ id: "item-1", priceCents: 12000, discountCents: 0, tipCents: 0, status: "active" });
+    state.sale.payments.push({
+      id: "payment-1",
+      saleId: "other-sale",
+      method: "card",
+      provider: "clover",
+      amountCents: 12000,
+      status: "approved",
+      providerPaymentId: "clover-payment-1",
+    });
+    const app = await buildServer({ db, logger: false });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/sales/sale-1/payments/recover-clover",
+      payload: {
+        amountCents: 12000,
+        providerPaymentId: "clover-payment-1",
+        reason: "Paid on Clover before POS ticket was created",
+        ownerPin: "1234",
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ error: "this Clover payment reference is already attached to another ticket" });
   });
 
   it("keeps sale unpaid when mock card declines", async () => {

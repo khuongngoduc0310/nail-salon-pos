@@ -413,6 +413,7 @@ export type PaymentReportRow = {
   amountCents: number;
   tipCents: number;
   status: string;
+  recovered?: boolean;
   createdAt: string;
 };
 
@@ -567,6 +568,19 @@ export async function addGiftCardPayment(saleId: string, data: { amountCents: nu
 }
 export async function addCardPayment(saleId: string, data: { amountCents: number; idempotencyKey: string }): Promise<{ payment: Record<string, unknown>; sale: Record<string, unknown>; terminalStatus: string }> {
   return fetchJson(`/sales/${saleId}/payments/card`, { method: "POST", body: JSON.stringify(data) });
+}
+export async function recoverCloverPayment(saleId: string, data: {
+  amountCents: number;
+  tipCents?: number;
+  providerOrderId?: string;
+  providerPaymentId?: string;
+  authCode?: string;
+  cardBrand?: string;
+  cardLast4?: string;
+  reason: string;
+  ownerPin: string;
+}): Promise<{ payment: Record<string, unknown>; sale: Record<string, unknown>; requiresTipAllocation: boolean }> {
+  return fetchJson(`/sales/${saleId}/payments/recover-clover`, { method: "POST", body: JSON.stringify(data) });
 }
 
 export async function reconcileCardPayment(paymentId: string): Promise<{ payment: Record<string, unknown>; sale?: Record<string, unknown> | null; terminalStatus: string }> {

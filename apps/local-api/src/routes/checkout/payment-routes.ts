@@ -4,8 +4,8 @@ import type { PaymentTerminalAdapter, TerminalPaymentResult, TerminalPaymentStat
 import type { PaymentMethod, PaymentStatus } from "@nail/shared";
 import type { DbClient } from "../../db.js";
 import { asObject, getParams, handleRouteError, HttpError, optionalInteger, optionalString, requiredInteger, requiredString } from "../../http.js";
-import { recomputeSale, requireRecord, safeJsonObject, readReferenceString } from "./checkout-helpers.js";
-import type { PaymentRecord } from "./types.js";
+import { recomputeSale, requireOwnerPin, requireRecord, safeJsonObject, readReferenceString } from "./checkout-helpers.js";
+import type { PaymentRecord, SaleRecord } from "./types.js";
 
 export function registerCheckoutPaymentRoutes(app: FastifyInstance, db: DbClient, terminal: PaymentTerminalAdapter) {
   app.post("/api/sales/:id/payments/cash", async (request, reply) => {
@@ -22,6 +22,10 @@ export function registerCheckoutPaymentRoutes(app: FastifyInstance, db: DbClient
 
   app.post("/api/sales/:id/payments/card/start", async (request, reply) => {
     return startCardPayment(request, reply, db, terminal);
+  });
+
+  app.post("/api/sales/:id/payments/recover-clover", async (request, reply) => {
+    return recoverCloverPayment(request, reply, db);
   });
 
   app.patch("/api/payments/:paymentId/provider-reference", async (request, reply) => {
@@ -212,6 +216,129 @@ async function startCardPayment(
   } catch (error) {
     return handleRouteError(error, reply);
   }
+}
+
+async function recoverCloverPayment(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  db: DbClient
+) {
+  try {
+    const body = asObject(request.body);
+    const params = getParams(request);
+    const saleId = requiredString(params.id, "id");
+    const amountCents = requiredInteger(body.amountCents, "amountCents");
+    const tipCents = optionalInteger(body.tipCents, "tipCents") ?? 0;
+    const providerOrderId = optionalString(body.providerOrderId, "providerOrderId");
+    const providerPaymentId = optionalString(body.providerPaymentId, "providerPaymentId");
+    const authCode = optionalString(body.authCode, "authCode");
+    const cardBrand = optionalString(body.cardBrand, "cardBrand");
+    const cardLast4 = optionalString(body.cardLast4, "cardLast4");
+    const reason = requiredString(body.reason, "reason");
+    const ownerPin = requiredString(body.ownerPin, "ownerPin");
+
+    if (amountCents <= 0) throw new HttpError(400, "amountCents must be a positive integer");
+    if (tipCents < 0) throw new HttpError(400, "tipCents cannot be negative");
+    if (tipCents > amountCents) throw new HttpError(400, "tipCents cannot exceed amountCents");
+    if (providerOrderId === undefined && providerPaymentId === undefined && authCode === undefined) {
+      throw new HttpError(400, "at least one Clover reference field is required");
+    }
+    if (cardLast4 !== undefined && !/^\d{4}$/.test(cardLast4)) {
+      throw new HttpError(400, "cardLast4 must be exactly 4 digits");
+    }
+
+    await requireOwnerPin(db, ownerPin);
+
+    const result = await db.$transaction(async (tx) => {
+      const sale = requireRecord<SaleRecord>(await tx.sale.findUnique({ where: { id: saleId } }), "sale not found");
+      if (sale.completedAt || sale.status === "refunded" || sale.status === "voided") {
+        throw new HttpError(400, "completed, refunded, or voided sale tickets cannot receive recovered payments");
+      }
+
+      const duplicate = await findDuplicateCloverPayment(tx, { providerOrderId, providerPaymentId, authCode }, saleId);
+      if (duplicate) {
+        throw new HttpError(400, "this Clover payment reference is already attached to another ticket");
+      }
+
+      const recoveredAt = new Date().toISOString();
+      const payment = await tx.payment.create({
+        data: {
+          saleId,
+          method: "card",
+          provider: "clover",
+          amountCents,
+          tipCents,
+          status: "approved",
+          providerOrderId,
+          providerPaymentId,
+          authCode,
+          cardBrand,
+          cardLast4,
+          rawProviderReference: {
+            status: "approved",
+            recovered: true,
+            recoverySource: "manual_clover_recovery",
+            recoveryReason: reason,
+            recoveredAt,
+            providerOrderId,
+            providerPaymentId,
+            authCode,
+            cardBrand,
+            cardLast4,
+            totalChargedCents: amountCents,
+            tipCents,
+            tipAllocation: tipCents > 0 ? "pending" : "not_applicable",
+          },
+        },
+      });
+
+      await (tx as any).saleAdjustment.create({
+        data: {
+          saleId,
+          type: "note",
+          previousValueJson: {},
+          newValueJson: {
+            note: "Manual Clover payment recovery",
+            amountCents,
+            tipCents,
+            providerOrderId,
+            providerPaymentId,
+            authCode,
+            recoveredAt,
+          },
+          reason,
+        },
+      });
+
+      const updatedSale = await recomputeSale(tx, saleId);
+      return { payment, sale: updatedSale, requiresTipAllocation: tipCents > 0 };
+    });
+
+    return reply.code(201).send(result);
+  } catch (error) {
+    return handleRouteError(error, reply);
+  }
+}
+
+async function findDuplicateCloverPayment(
+  db: DbClient,
+  refs: { providerOrderId?: string; providerPaymentId?: string; authCode?: string },
+  saleId: string
+): Promise<PaymentRecord | null> {
+  const or = [
+    refs.providerOrderId ? { providerOrderId: refs.providerOrderId } : null,
+    refs.providerPaymentId ? { providerPaymentId: refs.providerPaymentId } : null,
+    refs.authCode ? { authCode: refs.authCode } : null,
+  ].filter(Boolean);
+  if (or.length === 0) return null;
+  const matches = await db.payment.findMany({
+    where: {
+      method: "card",
+      provider: "clover",
+      OR: or,
+    },
+  }) as PaymentRecord[];
+  return matches.find((payment) => payment.saleId !== saleId || payment.status === "approved") ?? null;
 }
 
 async function recordApprovedPayment(

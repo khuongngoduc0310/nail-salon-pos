@@ -180,22 +180,28 @@ export async function registerReportRoutes(app: FastifyInstance, db: DbClient) {
           ...totals,
           byProvider,
         },
-        payments: payments.map((payment: any) => ({
-          id: payment.id,
-          saleId: payment.saleId,
-          customerName: payment.sale?.customer?.name ?? "Walk-in",
-          method: payment.method,
-          provider: payment.provider ?? null,
-          providerOrderId: payment.providerOrderId ?? null,
-          providerPaymentId: payment.providerPaymentId ?? null,
-          authCode: payment.authCode ?? null,
-          cardBrand: payment.cardBrand ?? null,
-          cardLast4: payment.cardLast4 ?? null,
-          amountCents: cents(payment.amountCents),
-          tipCents: cents(payment.tipCents),
-          status: payment.status,
-          createdAt: payment.createdAt,
-        })),
+        payments: payments.map((payment: any) => {
+          const rawReference = payment.rawProviderReference && typeof payment.rawProviderReference === "object" && !Array.isArray(payment.rawProviderReference)
+            ? payment.rawProviderReference
+            : {};
+          return {
+            id: payment.id,
+            saleId: payment.saleId,
+            customerName: payment.sale?.customer?.name ?? "Walk-in",
+            method: payment.method,
+            provider: payment.provider ?? null,
+            providerOrderId: payment.providerOrderId ?? null,
+            providerPaymentId: payment.providerPaymentId ?? null,
+            authCode: payment.authCode ?? null,
+            cardBrand: payment.cardBrand ?? null,
+            cardLast4: payment.cardLast4 ?? null,
+            amountCents: cents(payment.amountCents),
+            tipCents: cents(payment.tipCents),
+            status: payment.status,
+            recovered: rawReference.recovered === true || rawReference.recoverySource === "manual_clover_recovery",
+            createdAt: payment.createdAt,
+          };
+        }),
       };
     } catch (error) {
       return handleRouteError(error, reply);

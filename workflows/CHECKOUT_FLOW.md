@@ -56,6 +56,19 @@ If Clover connection is lost after payment is initiated:
 3. If Clover confirms approved, mark approved.
 4. If no approved payment exists, keep unpaid and allow retry.
 
+## Manual Clover recovery for missing POS capture
+
+If the customer already paid on Clover but the POS did not capture the ticket at the time:
+
+1. Create or open a POS ticket and add the actual services/workers.
+2. Record any cash or gift-card portions through the normal cash/gift-card payment flows.
+3. Use Recover Clover Card Payment for only the Clover-approved card portion.
+4. Enter the Clover-approved total card amount, the tip portion if any, at least one safe Clover reference, a reason, and owner PIN.
+5. If the recovered Clover payment includes a tip, allocate the tip with the normal tip allocation flow before completing the sale.
+6. Complete the sale only after approved payments cover the sale total including allocated tips.
+
+Never enter full card number, CVV, PIN, magstripe data, raw EMV, or sensitive card data during recovery.
+
 ## Finished ticket adjustments
 
 Finished/paid tickets are locked from normal checkout editing. If the owner needs to correct a wrong worker or service label after payment:

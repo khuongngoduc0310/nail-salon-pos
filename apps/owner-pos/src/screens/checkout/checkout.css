@@ -864,8 +864,75 @@
   background: var(--color-primary-50) !important;
 }
 
+.recover-clover-button {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  min-height: 54px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+}
+
+.recover-clover-button:hover:not(:disabled) {
+  border-color: var(--color-accent);
+  background: var(--color-accent-light);
+}
+
+.recover-clover-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.recover-clover-button strong {
+  color: var(--color-accent);
+  font-size: var(--text-sm);
+}
+
+.recover-clover-button span {
+  font-size: var(--text-xs);
+}
+
 .payment-keypad-modal {
   max-width: 460px;
+}
+
+.recover-clover-modal {
+  max-width: 560px;
+}
+
+.recover-clover-form {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.recover-clover-form__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.recover-clover-summary {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg);
+  padding: var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.recover-clover-summary span {
+  color: var(--color-text-muted);
+}
+
+.recover-clover-summary strong {
+  font-variant-numeric: tabular-nums;
 }
 
 .payment-keypad-modal .modal__footer {
@@ -1019,6 +1086,9 @@
   }
   .checkout-services-grid {
     grid-template-columns: repeat(3, 1fr);
+  }
+  .recover-clover-form__grid {
+    grid-template-columns: 1fr;
   }
 }
 
